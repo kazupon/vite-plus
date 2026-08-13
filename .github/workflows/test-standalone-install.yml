@@ -786,6 +786,8 @@ jobs:
             $logFile = Join-Path $caseDir "requests.jsonl"
             $stdoutFile = Join-Path $caseDir "registry.stdout.log"
             $stderrFile = Join-Path $caseDir "registry.stderr.log"
+            $installerStdoutFile = Join-Path $caseDir "installer.stdout.log"
+            $installerStderrFile = Join-Path $caseDir "installer.stderr.log"
 
             Remove-Item -Path $caseDir -Recurse -Force -ErrorAction SilentlyContinue
             New-Item -ItemType Directory -Path $homeDir, $vpHome -Force | Out-Null
@@ -820,9 +822,20 @@ jobs:
               $env:VP_VERSION = $env:TEST_VERSION
               $env:NPM_CONFIG_REGISTRY = $registry
 
-              $output = & powershell -NoProfile -ExecutionPolicy Bypass -File .\packages\cli\install.ps1 2>&1
-              $exitCode = $LASTEXITCODE
-              $text = $output -join "`n"
+              # Windows PowerShell 5.1 turns redirected native stderr into a
+              # NativeCommandError. Capture each stream separately so the
+              # expected tarball failure cannot stop this parent test script.
+              $installerArgs = @(
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-File", ".\packages\cli\install.ps1"
+              )
+              $installer = Start-Process -FilePath "powershell.exe" -ArgumentList $installerArgs -PassThru -Wait -RedirectStandardOutput $installerStdoutFile -RedirectStandardError $installerStderrFile
+              $exitCode = $installer.ExitCode
+              $text = @(
+                Get-Content -Path $installerStdoutFile -Raw -ErrorAction SilentlyContinue
+                Get-Content -Path $installerStderrFile -Raw -ErrorAction SilentlyContinue
+              ) -join "`n"
             } finally {
               if (-not $server.HasExited) {
                 Stop-Process -Id $server.Id -Force
