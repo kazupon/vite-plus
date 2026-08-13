@@ -512,10 +512,10 @@ get_version_from_metadata() {
 
 # Extract the platform tarball URL and provenance predicate from npm version
 # metadata. Bootstrap runs before Node.js is available and cannot require jq,
-# so this parser tracks complete JSON object paths rather than matching key
-# names anywhere in the response. That distinction prevents a package-defined
-# top-level `attestations` field or `dist.signatures` from being mistaken for
-# npm's `dist.attestations.provenance` metadata. Invalid JSON fails closed.
+# so this parser tracks each JSON path segment and container boundary rather
+# than matching key names or dot-joined paths. Keeping segments separate means
+# a package-defined key containing dots cannot impersonate npm's nested
+# `dist.attestations.provenance` metadata. Invalid JSON fails closed.
 parse_platform_distribution_metadata() {
   awk '
     function fail_json(message) {
@@ -579,14 +579,21 @@ parse_platform_distribution_metadata() {
       fail_json("unterminated JSON string")
     }
 
-    function remember_string(path, value) {
-      if (path == "dist.tarball") {
+    function is_object_key(depth, key) {
+      return path_kind[depth] == "object-key" && path_key[depth] == key
+    }
+
+    function remember_string(depth, value) {
+      if (depth == 2 && is_object_key(1, "dist") && is_object_key(2, "tarball")) {
         if (++tarball_count != 1) fail_json("duplicate dist.tarball")
         tarball = value
-      } else if (path == "dist.attestations.provenance.predicateType") {
+      } else if (depth == 4 && is_object_key(1, "dist") &&
+                 is_object_key(2, "attestations") &&
+                 is_object_key(3, "provenance") &&
+                 is_object_key(4, "predicateType")) {
         if (++predicate_count != 1) fail_json("duplicate provenance predicateType")
         predicate_type = value
-      } else if (path == "error") {
+      } else if (depth == 1 && is_object_key(1, "error")) {
         if (++error_count != 1) fail_json("duplicate registry error")
         registry_error = value
       }
@@ -612,7 +619,7 @@ parse_platform_distribution_metadata() {
       json_pos += length(literal)
     }
 
-    function parse_array(path,    c) {
+    function parse_array(depth,    c, child_depth) {
       json_pos++
       skip_whitespace()
       if (substr(json_text, json_pos, 1) == "]") {
@@ -621,7 +628,12 @@ parse_platform_distribution_metadata() {
       }
 
       while (1) {
-        parse_value(path "[]")
+        child_depth = depth + 1
+        path_kind[child_depth] = "array-item"
+        path_key[child_depth] = ""
+        parse_value(child_depth)
+        delete path_kind[child_depth]
+        delete path_key[child_depth]
         skip_whitespace()
         c = substr(json_text, json_pos, 1)
         if (c == "]") {
@@ -633,7 +645,7 @@ parse_platform_distribution_metadata() {
       }
     }
 
-    function parse_object(path,    key, child_path, c, object_id) {
+    function parse_object(depth,    key, child_depth, c, object_id) {
       json_pos++
       object_id = ++object_count
       skip_whitespace()
@@ -653,8 +665,12 @@ parse_platform_distribution_metadata() {
           fail_json("expected colon in JSON object")
         }
         json_pos++
-        child_path = path == "" ? key : path "." key
-        parse_value(child_path)
+        child_depth = depth + 1
+        path_kind[child_depth] = "object-key"
+        path_key[child_depth] = key
+        parse_value(child_depth)
+        delete path_kind[child_depth]
+        delete path_key[child_depth]
         skip_whitespace()
         c = substr(json_text, json_pos, 1)
         if (c == "}") {
@@ -666,16 +682,16 @@ parse_platform_distribution_metadata() {
       }
     }
 
-    function parse_value(path,    c, value) {
+    function parse_value(depth,    c, value) {
       skip_whitespace()
       c = substr(json_text, json_pos, 1)
       if (c == "{") {
-        parse_object(path)
+        parse_object(depth)
       } else if (c == "[") {
-        parse_array(path)
+        parse_array(depth)
       } else if (c == "\"") {
         value = parse_string()
-        remember_string(path, value)
+        remember_string(depth, value)
       } else if (c == "t") {
         parse_literal("true")
       } else if (c == "f") {
@@ -694,7 +710,7 @@ parse_platform_distribution_metadata() {
     END {
       json_length = length(json_text)
       json_pos = 1
-      parse_value("")
+      parse_value(0)
       skip_whitespace()
       if (json_pos <= json_length) fail_json("unexpected data after JSON value")
 

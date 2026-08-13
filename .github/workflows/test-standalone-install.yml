@@ -206,6 +206,7 @@ jobs:
           run_case missing reject
           run_case malformed reject
           run_case top-level-only reject
+          run_case dotted-top-level-key reject
           run_case unsupported reject
           run_case valid-v1 allow
           run_case valid-v0.2 allow
@@ -883,6 +884,7 @@ jobs:
           Invoke-ProvenanceCase -Mode "missing" -ExpectRejection $true
           Invoke-ProvenanceCase -Mode "malformed" -ExpectRejection $true
           Invoke-ProvenanceCase -Mode "top-level-only" -ExpectRejection $true -RawContentType $true
+          Invoke-ProvenanceCase -Mode "dotted-top-level-key" -ExpectRejection $true
           Invoke-ProvenanceCase -Mode "unsupported" -ExpectRejection $true
           Invoke-ProvenanceCase -Mode "valid-v1" -ExpectRejection $false
           Invoke-ProvenanceCase -Mode "valid-v0.2" -ExpectRejection $false

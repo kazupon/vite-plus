@@ -21,9 +21,15 @@ if (!portFile || !logFile) {
   throw new Error('--port-file and --log-file are required');
 }
 if (
-  !['missing', 'malformed', 'top-level-only', 'unsupported', 'valid-v1', 'valid-v0.2'].includes(
-    mode,
-  )
+  ![
+    'missing',
+    'malformed',
+    'top-level-only',
+    'dotted-top-level-key',
+    'unsupported',
+    'valid-v1',
+    'valid-v0.2',
+  ].includes(mode)
 ) {
   throw new Error(`Unsupported mode: ${mode}`);
 }
@@ -56,6 +62,8 @@ function platformMetadata(packageName, registryBase) {
     metadata.attestations = {
       provenance: { predicateType: 'https://slsa.dev/provenance/v1' },
     };
+  } else if (mode === 'dotted-top-level-key') {
+    metadata['dist.attestations.provenance.predicateType'] = 'https://slsa.dev/provenance/v1';
   } else if (mode === 'unsupported') {
     metadata.dist.attestations = {
       provenance: { predicateType: 'https://example.test/provenance/v1' },
