@@ -65,7 +65,7 @@ skip-platforms = ["windows"]
 steps = [
   { argv = ["vpt", "rm", "-f", "$VP_HOME/config.json"], snapshot = false },
   { argv = ["vpt", "chmod", "+x", "system-bin/pnpm"], snapshot = false },
-  { argv = ["pnpm", "--version"], tty = false, envs = [["PATH", "${VP_HOME}/bin${PATH_SEPARATOR}${workspace}/system-bin${PATH_SEPARATOR}${PATH}"]], comment = "an undecided non-interactive shim uses managed pnpm without prompting" },
+  { argv = ["pnpm", "--version"], tty = false, snapshot = false, envs = [["PATH", "${VP_HOME}/bin${PATH_SEPARATOR}${workspace}/system-bin${PATH_SEPARATOR}${PATH}"]], comment = "an undecided non-interactive shim uses managed pnpm without prompting; the registry fallback version is intentionally not snapshotted" },
   { argv = ["vp", "env", "current", "pnpm", "--json"], tty = false, envs = [["PATH", "${VP_HOME}/bin${PATH_SEPARATOR}${workspace}/system-bin${PATH_SEPARATOR}${PATH}"], ["NPM_CONFIG_REGISTRY", "http://127.0.0.1:9"]], comment = "environment inspection uses the same stable managed default" },
   { argv = ["vpt", "stat-file", "$VP_HOME/config.json", "--assert", "missing"], comment = "non-interactive use does not record a choice" },
 ]
