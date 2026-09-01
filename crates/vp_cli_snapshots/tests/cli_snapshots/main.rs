@@ -319,7 +319,13 @@ impl PlatformFilter {
 #[derive(Clone, Copy, serde::Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]
 enum RequiredTool {
+    Sh,
+    Bash,
+    Zsh,
+    Cmd,
+    Fish,
     Nu,
+    Pwsh,
 }
 
 impl RequiredTool {
@@ -327,7 +333,13 @@ impl RequiredTool {
     /// reports that error instead of silently hiding a bad override.
     fn is_missing(self) -> bool {
         match self {
+            Self::Sh => matches!(flavor::sh_path(), Ok(None)),
+            Self::Bash => matches!(flavor::bash_path(), Ok(None)),
+            Self::Zsh => matches!(flavor::zsh_path(), Ok(None)),
+            Self::Cmd => matches!(flavor::cmd_path(), Ok(None)),
+            Self::Fish => matches!(flavor::fish_path(), Ok(None)),
             Self::Nu => matches!(flavor::nushell_path(), Ok(None)),
+            Self::Pwsh => matches!(flavor::powershell_path(), Ok(None)),
         }
     }
 }
@@ -457,7 +469,13 @@ struct CaseInstall {
     path_env: OsString,
     tool_dirs: Vec<PathBuf>,
     vpt: PathBuf,
+    sh: Option<PathBuf>,
+    bash: Option<PathBuf>,
+    zsh: Option<PathBuf>,
+    cmd: Option<PathBuf>,
+    fish: Option<PathBuf>,
     nu: Option<PathBuf>,
+    pwsh: Option<PathBuf>,
 }
 
 impl CaseInstall {
@@ -472,9 +490,45 @@ impl CaseInstall {
         if program == "vpt" {
             return Ok(self.vpt.clone());
         }
+        if program == "sh" {
+            return self.sh.clone().ok_or_else(|| {
+                "`sh` is required by this snapshot case; install it or set VP_SNAP_SH_BIN"
+                    .to_owned()
+            });
+        }
+        if program == "bash" {
+            return self.bash.clone().ok_or_else(|| {
+                "`bash` is required by this snapshot case; install Bash or set VP_SNAP_BASH_BIN"
+                    .to_owned()
+            });
+        }
+        if program == "zsh" {
+            return self.zsh.clone().ok_or_else(|| {
+                "`zsh` is required by this snapshot case; install Zsh or set VP_SNAP_ZSH_BIN"
+                    .to_owned()
+            });
+        }
+        if program == "cmd" {
+            return self.cmd.clone().ok_or_else(|| {
+                "`cmd` is required by this snapshot case; set VP_SNAP_CMD_BIN to cmd.exe".to_owned()
+            });
+        }
+        if program == "fish" {
+            return self.fish.clone().ok_or_else(|| {
+                "`fish` is required by this snapshot case; install Fish or set VP_SNAP_FISH_BIN"
+                    .to_owned()
+            });
+        }
         if program == "nu" {
             return self.nu.clone().ok_or_else(|| {
                 "`nu` is required by this snapshot case; install Nushell or set VP_SNAP_NU_BIN"
+                    .to_owned()
+            });
+        }
+        if program == "pwsh" {
+            return self.pwsh.clone().ok_or_else(|| {
+                "`pwsh` is required by this snapshot case; install PowerShell or set \
+                 VP_SNAP_PWSH_BIN"
                     .to_owned()
             });
         }
@@ -538,7 +592,7 @@ impl CaseHome {
                 .join("vp-shim.exe");
             if !shim.is_file() {
                 return Err(format!(
-                    "global vp trampoline template not found at {}; run `cargo build -p vp_trampoline`",
+                    "The global vp trampoline template does not exist at {}. Run `node packages/tools/src/build-trampoline.ts`.",
                     shim.display()
                 ));
             }
@@ -573,7 +627,13 @@ impl CaseHome {
             path_env: compose_path_env(&path_dirs),
             tool_dirs,
             vpt: runtime.vpt.clone(),
+            sh: runtime.sh.clone(),
+            bash: runtime.bash.clone(),
+            zsh: runtime.zsh.clone(),
+            cmd: runtime.cmd.clone(),
+            fish: runtime.fish.clone(),
             nu: runtime.nu.clone(),
+            pwsh: runtime.pwsh.clone(),
         })
     }
 
@@ -633,12 +693,28 @@ impl CaseHome {
             .envs(&env)
             .output()
             .map_err(|e| format!("failed to run `vp env setup`: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "`vp env setup` failed with status {}\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+
+        // Cases start from fresh-install consent. A dedicated first-use fixture
+        // removes this config before exercising upgrade compatibility.
+        let output = std::process::Command::new(vp)
+            .args(["env", "on", "pm"])
+            .env_clear()
+            .envs(&env)
+            .output()
+            .map_err(|e| format!("failed to run `vp env on pm`: {e}"))?;
         if output.status.success() {
             return Ok(());
         }
-
         Err(format!(
-            "`vp env setup` failed with status {}\nstdout:\n{}\nstderr:\n{}",
+            "`vp env on pm` failed with status {}\nstdout:\n{}\nstderr:\n{}",
             output.status,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
@@ -744,6 +820,16 @@ fn baseline_env(case_home: &CaseHome, install: &CaseInstall) -> BTreeMap<String,
     // this via `unset-env`.
     env.insert("VP_SKIP_INSTALL".into(), "1".into());
     env.insert("NPM_CONFIG_PREFIX".into(), case_home.npm_prefix().into_os_string());
+    // pnpm >= 11 defaults `minimumReleaseAge` to 24 hours. Real-install fixtures
+    // pull the just-published Vite+ toolchain (oxlint, oxfmt, vitest, the oxc
+    // family), so on the day of an upstream bump pnpm quarantines them and
+    // records exact-version `minimumReleaseAgeExclude` entries in the generated
+    // `pnpm-workspace.yaml` — output that churns with the publish calendar
+    // rather than with vp behaviour. Opt out so snapshots stay deterministic
+    // whatever the age of the bundled versions. pnpm >= 10.6 only reads the
+    // PNPM_CONFIG_* spelling; older pnpm reads the lowercase form.
+    env.insert("PNPM_CONFIG_MINIMUM_RELEASE_AGE".into(), "0".into());
+    env.insert("pnpm_config_minimum_release_age".into(), "0".into());
     for (key, value) in [
         ("GIT_AUTHOR_NAME", "vite-plus-test"),
         ("GIT_AUTHOR_EMAIL", "test@vite-plus.invalid"),
@@ -843,7 +929,8 @@ fn wait_with_deadline(
 /// Expands `${NAME}` references in a step env value. `${workspace}` resolves
 /// to the step's working directory and any other name to the case env, so a
 /// fixture can express the shell forms `VP_HOME="$(pwd)/home"` and
-/// `PATH="$(pwd)/home/bin:$PATH"` without a shell. Unknown names stay
+/// `PATH="$(pwd)/home/bin:$PATH"` without a shell. `${PATH_SEPARATOR}`
+/// expands to the platform's PATH-list separator. Unknown names stay
 /// verbatim, like vpt's argument expansion.
 fn expand_env_value(value: &str, cwd: &Path, case_env: &BTreeMap<String, OsString>) -> OsString {
     let mut out = OsString::new();
@@ -858,6 +945,8 @@ fn expand_env_value(value: &str, cwd: &Path, case_env: &BTreeMap<String, OsStrin
         let name = &from_ref[2..end];
         if name == "workspace" {
             out.push(cwd.as_os_str());
+        } else if name == "PATH_SEPARATOR" {
+            out.push(if cfg!(windows) { ";" } else { ":" });
         } else if let Some(resolved) = case_env.get(name) {
             out.push(resolved);
         } else {
@@ -1364,8 +1453,8 @@ fn run_case(
         if step.snapshot || !succeeded {
             let mut redacted = redact_output(raw_output, &redactions, !step.formatted_snapshot);
             // A version-probe step's output is a bare semver that varies by
-            // environment (the managed Node's bundled npm or a
-            // corepack-resolved pin); mask it. Scoped by argv so
+            // environment (the managed Node's bundled npm or a package
+            // manager pin); mask it. Scoped by argv so
             // fixture-controlled bare versions elsewhere (a printed
             // `.node-version` file) stay assertable.
             let version_probe = matches!(argv.first().map(String::as_str), Some("npm" | "npx"))

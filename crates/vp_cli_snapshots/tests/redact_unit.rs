@@ -77,11 +77,46 @@ fn masks_bare_runtime_tool_versions_by_name_context() {
 }
 
 #[test]
+fn masks_bun_build_hash_only_in_bun_banners() {
+    // bun banners append the build's short commit hash after the version,
+    // which changes with every bun release.
+    let input = "bun pm trust v1.4.0 (34cbb9a40)\n".to_owned();
+    assert_eq!(redact_output(input, &[], true), "bun pm trust <version> (<hash>)\n");
+    // Parenthesized hex without a preceding masked version stays verbatim.
+    let unrelated = "commit (deadbeef1) applied\n".to_owned();
+    assert_eq!(redact_output(unrelated.clone(), &[], true), unrelated);
+}
+
+#[test]
+fn normalizes_managed_executable_paths_and_missing_commands() {
+    let input = concat!(
+        r#""bin_path": "<home>/.vite-plus/js_runtime/node/24.18.1/node.exe""#,
+        "\n",
+        r#""pnpm": "<home>/.vite-plus/package_manager/pnpm/<version>/pnpm/bin/pnpm.cmd""#,
+        "\n",
+        "error: Command execution failed: No such file or directory (os error 2)\n",
+    )
+    .to_owned();
+    assert_eq!(
+        redact_output(input, &[], true),
+        concat!(
+            r#""bin_path": "<home>/.vite-plus/js_runtime/node/<version>/bin/node""#,
+            "\n",
+            r#""pnpm": "<home>/.vite-plus/package_manager/pnpm/<version>/pnpm/bin/pnpm""#,
+            "\n",
+            "error: Command execution failed: program not found\n",
+        )
+    );
+}
+
+#[test]
 fn masks_managed_node_versions_in_environment_output() {
     let input = concat!(
         "Node: 24.18.1\n",
         "\"nodeVersion\": \"24.18.1\"\n",
         "✓ Default Node.js version set to lts (currently 24.18.1)\n",
+        "No default Node.js version configured. Using latest LTS (24.18.1).\n",
+        "  Currently resolves to: 24.18.1\n",
         "just-a-normal-package@0.0.0   24.18.1        just-a-normal-package\n",
         "fixture pin: 22.18.0\n",
     )
@@ -92,6 +127,8 @@ fn masks_managed_node_versions_in_environment_output() {
             "Node: <version>\n",
             "\"nodeVersion\": \"<version>\"\n",
             "✓ Default Node.js version set to lts (currently <version>)\n",
+            "No default Node.js version configured. Using latest LTS (<version>).\n",
+            "  Currently resolves to: <version>\n",
             "just-a-normal-package@0.0.0   <version>        just-a-normal-package\n",
             "fixture pin: 22.18.0\n",
         )
@@ -121,6 +158,7 @@ fn masks_current_vite_plus_version_in_upgrade_check_output() {
     let input = concat!(
         "info: found vite-plus@0.1.21-alpha.7 (current: 0.2.4)\n",
         "Update available: 0.2.4 → 0.1.21-alpha.7\n",
+        "vp update available: 0.2.4 → 0.3.0, run vp upgrade\n",
     )
     .to_owned();
     assert_eq!(
@@ -128,6 +166,7 @@ fn masks_current_vite_plus_version_in_upgrade_check_output() {
         concat!(
             "info: found vite-plus@0.1.21-alpha.7 (current: <version>)\n",
             "Update available: <version> → 0.1.21-alpha.7\n",
+            "vp update available: <version> → 0.3.0, run vp upgrade\n",
         )
     );
 }
@@ -308,11 +347,11 @@ fn masks_toolchain_build_time_in_human_and_json_output() {
 fn masks_toolchain_versions_and_revisions_in_human_hint_and_json_output() {
     let revision = "ebe583739b0b1e7828199b9ee9dd52273fa2fd20";
     let human = format!(
-        "Vite+ toolchain (global)\n\nvite-plus@0.2.8\n|-- bundles vite@8.2.1\n`-- compiles vite-task (revision {revision})\n"
+        "Vite+ toolchain (global)\n\nvite-plus@0.2.8\n├── bundles vite@8.2.1\n└── compiles vite-task (revision {revision})\n"
     );
     assert_eq!(
         redact_output(human, &[], true),
-        "Vite+ toolchain (global)\n\nvite-plus@<version>\n|-- bundles vite@<version>\n`-- compiles vite-task (revision <revision>)\n"
+        "Vite+ toolchain (global)\n\nvite-plus@<version>\n├── bundles vite@<version>\n└── compiles vite-task (revision <revision>)\n"
     );
 
     let hint = "Vite+ also provides vite@8.2.1 through its toolchain.\n".to_owned();

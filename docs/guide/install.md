@@ -19,7 +19,9 @@ Vite+ detects the package manager from the workspace root in this order:
 9. `bunfig.toml`
 10. `yarn.config.cjs`
 
-If none of those files are present, `vp` falls back to `pnpm` by default. Vite+ automatically downloads the matching package manager and uses it for the command you ran. When detection comes from lockfiles or config files, the resolved version is written to `devEngines.packageManager` so future runs are deterministic; projects that already declare `packageManager` or `devEngines.packageManager` are left as-is.
+If none of those files are present, `vp` falls back to `pnpm` by default. Vite+ automatically downloads the matching package manager and uses it for the command you ran, but package-manager detection never rewrites `package.json`. Use `vp env pin <package-manager>@<version>` when the project should declare an exact version explicitly.
+
+After selecting the package manager, Vite+ forwards the command without separately validating whether `package.json` exists. Missing-manifest behavior therefore matches the selected package manager.
 
 The [`devEngines.packageManager`](https://docs.npmjs.com/cli/v11/configuring-npm/package-json#devengines) field accepts a single object or an array of objects, and its `version` may be a semver range:
 
@@ -81,7 +83,8 @@ Updates keep the version spec a package was installed with: a package installed 
 ::: warning
 These commands do **NOT** interact with the underlying package manager's global installation directory.
 
-Instead, Vite+ manages its own global packages under `VP_HOME/packages`, allowing them to remain available across different Node.js versions.
+Instead, Vite+ stores its global packages in `packages/` under the resolved data
+directory. These packages remain available across different Node.js versions.
 
 As a result, commands such as `vp link` do not affect Vite+'s global packages and will not appear in `vp list -g`.
 :::

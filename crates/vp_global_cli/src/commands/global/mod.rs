@@ -16,8 +16,8 @@ pub mod install;
 pub mod outdated;
 pub mod packages;
 
-/// Core shims that should not be overwritten by package binaries.
-pub(crate) const CORE_SHIMS: &[&str] = &["node", "npm", "npx", "vp"];
+/// Legacy managed globals superseded by the default package-manager shims.
+pub(crate) const LEGACY_PACKAGE_MANAGER_PACKAGES: &[&str] = &["yarn", "pnpm", "bun", "corepack"];
 
 #[derive(Debug)]
 struct PackageVersion {
@@ -61,7 +61,7 @@ async fn npm_view(
     field: &str,
 ) -> Result<Vec<u8>, Error> {
     let output = Command::new(npm_path.as_path())
-        .args(["view", package_spec, field, "--json"])
+        .args(["view", "-g", package_spec, field, "--json"])
         .env("PATH", format_path_prepended(node_bin_dir.as_path()))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

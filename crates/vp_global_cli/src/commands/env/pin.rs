@@ -10,10 +10,18 @@
 use std::{io::Write, process::ExitStatus};
 
 use vp_js_runtime::NodeProvider;
+use vp_pm_cli::{
+    PackageManagerType, download_package_manager, resolve_package_manager_from_package_json,
+    resolve_package_manager_version,
+};
 use vp_shared::output;
 use vt_path::AbsolutePathBuf;
 
-use super::config::{get_config_path, load_config};
+use super::{
+    config::{get_config_path, load_config},
+    package_manager,
+    spec::{EnvScope, EnvSpecs},
+};
 use crate::{cli::PinTarget, error::Error};
 
 /// Node version file name
@@ -25,7 +33,7 @@ const PACKAGE_JSON_FILE: &str = "package.json";
 /// Execute the pin command.
 pub async fn execute(
     cwd: AbsolutePathBuf,
-    version: Option<String>,
+    specs: Vec<String>,
     unpin: bool,
     no_install: bool,
     force: bool,
@@ -33,13 +41,72 @@ pub async fn execute(
 ) -> Result<ExitStatus, Error> {
     // Handle --unpin flag
     if unpin {
-        return do_unpin(&cwd, target).await;
+        let scope = match specs.as_slice() {
+            [] => EnvScope::All,
+            [scope] => EnvScope::parse(Some(scope))?,
+            _ => return Err(Error::Other("pin --unpin accepts at most one scope".into())),
+        };
+        return do_unpin_scope(&cwd, scope, target).await;
     }
 
-    match version {
-        Some(v) => do_pin(&cwd, &v, no_install, force, target).await,
-        None => show_pinned(&cwd).await,
+    if specs.is_empty() {
+        show_pinned(&cwd).await?;
+        println!();
+        return show_package_manager_pin(&cwd).await;
     }
+
+    let specs = EnvSpecs::parse(&specs)?;
+    let package_manager_root = if specs.package_manager.is_some() {
+        workspace_root(&cwd)?.ok_or_else(|| {
+            Error::Other("cannot pin a package manager without package.json".into())
+        })?
+    } else {
+        cwd.clone()
+    };
+    if specs.node.is_some()
+        && specs.package_manager.is_some()
+        && matches!(target, Some(PinTarget::NodeVersion | PinTarget::PackageManager))
+    {
+        return Err(Error::Other(
+            "mixed Node.js and package-manager pins require the default targets or --target dev-engines"
+                .into(),
+        ));
+    }
+
+    if let Some(version) = specs.node {
+        do_pin(&cwd, &version, no_install, force, target).await?;
+    }
+    if let Some((package_manager, version, hash)) = specs.package_manager {
+        pin_package_manager(
+            &package_manager_root,
+            package_manager,
+            &version,
+            hash.as_deref(),
+            no_install,
+            force,
+            target,
+        )
+        .await?;
+    }
+    Ok(ExitStatus::default())
+}
+
+async fn show_package_manager_pin(cwd: &AbsolutePathBuf) -> Result<ExitStatus, Error> {
+    match resolve_package_manager_from_package_json(cwd)? {
+        Some(resolution) => {
+            println!(
+                "Pinned package manager: {}@{}",
+                resolution.package_manager_type, resolution.version
+            );
+            println!(
+                "  Source: {} ({})",
+                resolution.source_path.as_path().display(),
+                resolution.source
+            );
+        }
+        None => println!("No package manager pinned."),
+    }
+    Ok(ExitStatus::default())
 }
 
 /// Show the current pinned version.
@@ -171,6 +238,11 @@ async fn do_pin(
                 ));
             }
             pinned
+        }
+        PinTarget::PackageManager => {
+            return Err(Error::Other(
+                "--target package-manager requires a package-manager spec".into(),
+            ));
         }
     };
 
@@ -576,18 +648,413 @@ pub async fn do_unpin(
                 println!("No Node.js pin found in current directory.");
             }
         }
+        PinTarget::PackageManager => {
+            return Err(Error::Other(
+                "--target package-manager requires package-manager scope".into(),
+            ));
+        }
     }
 
     Ok(ExitStatus::default())
 }
 
+pub async fn do_unpin_scope(
+    cwd: &AbsolutePathBuf,
+    scope: EnvScope,
+    target: Option<PinTarget>,
+) -> Result<ExitStatus, Error> {
+    if matches!(scope, EnvScope::Node) && matches!(target, Some(PinTarget::PackageManager)) {
+        return Err(Error::Other(
+            "--target package-manager is incompatible with node scope".into(),
+        ));
+    }
+    if scope.includes_package_managers()
+        && !scope.includes_node()
+        && matches!(target, Some(PinTarget::NodeVersion))
+    {
+        return Err(Error::Other(
+            "--target node-version is incompatible with package-manager scope".into(),
+        ));
+    }
+    if scope.includes_node() && !matches!(target, Some(PinTarget::PackageManager)) {
+        do_unpin(cwd, target).await?;
+    }
+    if scope.includes_package_managers() {
+        unpin_package_manager(cwd, scope, target).await?;
+    }
+    Ok(ExitStatus::default())
+}
+
+async fn pin_package_manager(
+    cwd: &AbsolutePathBuf,
+    package_manager: PackageManagerType,
+    version: &str,
+    hash: Option<&str>,
+    no_install: bool,
+    force: bool,
+    target: Option<PinTarget>,
+) -> Result<ExitStatus, Error> {
+    if matches!(target, Some(PinTarget::NodeVersion)) {
+        return Err(Error::Other("--target node-version cannot pin a package manager".into()));
+    }
+    let resolved = resolve_package_manager_version(package_manager, version).await?;
+    package_manager::warn_if_target_differs(cwd, package_manager).await;
+    let package_json_path = cwd.join(PACKAGE_JSON_FILE);
+    let content = tokio::fs::read_to_string(&package_json_path).await?;
+    let package_json: serde_json::Value = serde_json::from_str(&content)?;
+    let use_top_level = matches!(target, Some(PinTarget::PackageManager))
+        || (target.is_none() && package_json.get("packageManager").is_some());
+    let shadowing_top_level =
+        if use_top_level { None } else { existing_package_manager_pin(&content, true) };
+    let shadowing_top_level = shadowing_top_level.filter(|(name, version)| {
+        PackageManagerType::from_name(name) == Some(package_manager)
+            && version.as_str() != resolved.as_str()
+    });
+    if let Some((name, version)) = existing_package_manager_pin(&content, use_top_level) {
+        let existing = format!("{name}@{version}");
+        let next = format!("{package_manager}@{resolved}");
+        if existing != next
+            && !confirm_overwrite_pin("Package manager already pinned to", &existing, &next, force)?
+        {
+            return Ok(ExitStatus::default());
+        }
+    }
+    let mut changed = false;
+    let updated = vp_shared::edit_json_object(&content, |obj| {
+        if use_top_level {
+            let prefix = format!("{package_manager}@{resolved}");
+            let existing = obj.get("packageManager").and_then(serde_json::Value::as_str);
+            let next = hash.map_or_else(
+                || {
+                    existing
+                        .filter(|value| {
+                            *value == prefix
+                                || value
+                                    .strip_prefix(&prefix)
+                                    .is_some_and(|suffix| suffix.starts_with('+'))
+                        })
+                        .unwrap_or(&prefix)
+                        .to_string()
+                },
+                |hash| format!("{prefix}+{hash}"),
+            );
+            if obj.get("packageManager").and_then(serde_json::Value::as_str) != Some(&next) {
+                obj.insert("packageManager".into(), serde_json::Value::String(next));
+                changed = true;
+            }
+        } else {
+            set_dev_engines_package_manager(obj, package_manager, &resolved);
+            changed = true;
+        }
+    })
+    .map_err(|error| Error::Other(format!("failed to update package.json: {error}").into()))?;
+    if !changed {
+        println!("Already pinned to {package_manager}@{resolved}");
+        return Ok(ExitStatus::default());
+    }
+    tokio::fs::write(&package_json_path, updated).await?;
+    crate::shim::invalidate_cache();
+    output::success(&format!("Pinned package manager to {package_manager}@{resolved}"));
+    if let Some((name, version)) = shadowing_top_level {
+        output::warn(&format!(
+            "Top-level packageManager {name}@{version} remains effective; remove or update it to use devEngines.packageManager {package_manager}@{resolved}."
+        ));
+    }
+    if no_install {
+        output::note("Package manager will be downloaded on first use.");
+    } else if let Err(error) = download_package_manager(package_manager, &resolved, hash).await {
+        output::warn(&format!("Failed to download {package_manager} {resolved}: {error}"));
+    }
+    Ok(ExitStatus::default())
+}
+
+fn existing_package_manager_pin(content: &str, top_level: bool) -> Option<(String, String)> {
+    if top_level {
+        let package_json: serde_json::Value = serde_json::from_str(content).ok()?;
+        let value = package_json.get("packageManager")?.as_str()?;
+        let (name, version) = value.split_once('@')?;
+        return Some((
+            name.into(),
+            version.split_once('+').map_or(version, |(version, _)| version).into(),
+        ));
+    }
+
+    let package_json: vp_shared::PackageJson = serde_json::from_str(content).ok()?;
+    let package_manager = package_json.dev_engines?.package_manager?;
+    let entry = package_manager.entries().first()?;
+    Some((entry.name.to_string(), entry.version.as_deref().unwrap_or("*").to_string()))
+}
+
+fn set_dev_engines_package_manager(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    package_manager: PackageManagerType,
+    version: &str,
+) {
+    use serde_json::Value;
+
+    let entry = vp_shared::dev_engine_entry(&package_manager.to_string(), version);
+    let Some(dev_engines) = obj.get_mut("devEngines").and_then(Value::as_object_mut) else {
+        vp_shared::insert_after(
+            obj,
+            "engines",
+            "devEngines",
+            serde_json::json!({ "packageManager": entry }),
+        );
+        return;
+    };
+    let Some(field) = dev_engines.get_mut("packageManager") else {
+        dev_engines.insert("packageManager".into(), entry);
+        return;
+    };
+    match field {
+        Value::Object(value)
+            if value.get("name").and_then(Value::as_str)
+                == Some(package_manager.to_string().as_str()) =>
+        {
+            value.insert("version".into(), Value::String(version.into()));
+        }
+        Value::Object(_) => {
+            let previous = std::mem::take(field);
+            *field = Value::Array(vec![entry, previous]);
+        }
+        Value::Array(entries) => {
+            let name = package_manager.to_string();
+            let mut entry = entries
+                .iter()
+                .position(|value| value.get("name").and_then(Value::as_str) == Some(name.as_str()))
+                .map(|index| entries.remove(index))
+                .unwrap_or(entry);
+            if let Some(value) = entry.as_object_mut() {
+                value.insert("version".into(), Value::String(version.into()));
+            }
+            entries.insert(0, entry);
+        }
+        _ => *field = entry,
+    }
+}
+
+async fn unpin_package_manager(
+    cwd: &AbsolutePathBuf,
+    scope: EnvScope,
+    target: Option<PinTarget>,
+) -> Result<(), Error> {
+    if matches!(target, Some(PinTarget::NodeVersion)) {
+        return Ok(());
+    }
+    let root = workspace_root(cwd)?.unwrap_or_else(|| cwd.clone());
+    let package_json_path = root.join(PACKAGE_JSON_FILE);
+    let Ok(content) = tokio::fs::read_to_string(&package_json_path).await else {
+        println!("No package manager pin found in current directory.");
+        return Ok(());
+    };
+    let effective = resolve_package_manager_from_package_json(&root)?;
+    let expected = match scope {
+        EnvScope::PackageManager(package_manager) => Some(package_manager),
+        _ if matches!(target, Some(PinTarget::DevEngines)) => {
+            let package_json: vp_shared::PackageJson = serde_json::from_str(&content)?;
+            package_json.dev_engines.and_then(|dev_engines| dev_engines.package_manager).and_then(
+                |field| {
+                    field
+                        .entries()
+                        .iter()
+                        .find_map(|entry| PackageManagerType::from_name(&entry.name))
+                },
+            )
+        }
+        _ => effective.as_ref().map(|resolution| resolution.package_manager_type),
+    };
+    let mut changed = false;
+    let updated = vp_shared::edit_json_object(&content, |obj| {
+        let remove_top_level = matches!(target, Some(PinTarget::PackageManager))
+            || (target.is_none() && obj.get("packageManager").is_some());
+        let top_level_matches = expected.is_none_or(|expected| {
+            obj.get("packageManager")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| value.split_once('@'))
+                .and_then(|(name, _)| PackageManagerType::from_name(name))
+                == Some(expected)
+        });
+        if remove_top_level && top_level_matches {
+            changed = obj.remove("packageManager").is_some();
+        } else if !matches!(target, Some(PinTarget::PackageManager))
+            && let Some(expected) = expected
+        {
+            changed = remove_dev_engines_package_manager(obj, expected);
+        }
+    })
+    .map_err(|error| Error::Other(format!("failed to update package.json: {error}").into()))?;
+    if changed {
+        tokio::fs::write(&package_json_path, updated).await?;
+        crate::shim::invalidate_cache();
+        output::success("Removed package-manager pin");
+    } else {
+        println!("No package manager pin found in current directory.");
+    }
+    Ok(())
+}
+
+fn workspace_root(cwd: &AbsolutePathBuf) -> Result<Option<AbsolutePathBuf>, Error> {
+    match vt_workspace::find_workspace_root(cwd) {
+        Ok((workspace, _)) => Ok(Some(workspace.path.to_absolute_path_buf())),
+        Err(vt_workspace::Error::PackageJsonNotFound(_)) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn remove_dev_engines_package_manager(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    expected: PackageManagerType,
+) -> bool {
+    let Some(dev_engines) = obj.get_mut("devEngines").and_then(serde_json::Value::as_object_mut)
+    else {
+        return false;
+    };
+    let Some(field) = dev_engines.get_mut("packageManager") else {
+        return false;
+    };
+    let expected = expected.to_string();
+    let changed = match field {
+        serde_json::Value::Object(entry) => {
+            entry.get("name").and_then(serde_json::Value::as_str) == Some(expected.as_str())
+        }
+        serde_json::Value::Array(entries) => {
+            let before = entries.len();
+            entries.retain(|entry| {
+                entry.get("name").and_then(serde_json::Value::as_str) != Some(expected.as_str())
+            });
+            before != entries.len()
+        }
+        _ => false,
+    };
+    let remove_field = changed
+        && match field {
+            serde_json::Value::Object(_) => true,
+            serde_json::Value::Array(entries) => entries.is_empty(),
+            _ => false,
+        };
+    if remove_field {
+        dev_engines.remove("packageManager");
+    }
+    changed
+}
+
 #[cfg(test)]
 mod tests {
-    use serial_test::serial;
     use tempfile::TempDir;
+    use vp_shared::env_vars;
     use vt_path::AbsolutePathBuf;
 
     use super::*;
+
+    /// Shared VP_HOME for tests that hit the real Node.js version index:
+    /// pinning isolates them from concurrent scopes, and one shared root
+    /// keeps the index cache warm across tests and runs.
+    fn shared_vp_home() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("vp-global-cli-tests-vp-home");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn package_manager_pin_preserves_matching_integrity_suffix() {
+        let temp_dir = TempDir::new().unwrap();
+        let cwd = AbsolutePathBuf::new(temp_dir.path().to_path_buf()).unwrap();
+        tokio::fs::write(
+            cwd.join("package.json"),
+            "{\n  \"packageManager\": \"pnpm@10.18.0+sha512.keep\"\n}\n",
+        )
+        .await
+        .unwrap();
+
+        pin_package_manager(&cwd, PackageManagerType::Pnpm, "10.18.0", None, true, true, None)
+            .await
+            .unwrap();
+
+        let content = tokio::fs::read_to_string(cwd.join("package.json")).await.unwrap();
+        assert!(content.contains("pnpm@10.18.0+sha512.keep"));
+    }
+
+    #[tokio::test]
+    async fn package_manager_pin_drops_stale_integrity_suffix() {
+        let temp_dir = TempDir::new().unwrap();
+        let cwd = AbsolutePathBuf::new(temp_dir.path().to_path_buf()).unwrap();
+        tokio::fs::write(
+            cwd.join("package.json"),
+            "{\n  \"packageManager\": \"pnpm@10.17.0+sha512.stale\"\n}\n",
+        )
+        .await
+        .unwrap();
+
+        pin_package_manager(&cwd, PackageManagerType::Pnpm, "10.18.0", None, true, true, None)
+            .await
+            .unwrap();
+
+        let content = tokio::fs::read_to_string(cwd.join("package.json")).await.unwrap();
+        assert!(content.contains("pnpm@10.18.0"));
+        assert!(!content.contains("sha512.stale"));
+    }
+
+    #[tokio::test]
+    async fn package_manager_pin_uses_explicit_integrity_suffix() {
+        let temp_dir = TempDir::new().unwrap();
+        let cwd = AbsolutePathBuf::new(temp_dir.path().to_path_buf()).unwrap();
+        tokio::fs::write(
+            cwd.join("package.json"),
+            "{\n  \"packageManager\": \"pnpm@10.17.0\"\n}\n",
+        )
+        .await
+        .unwrap();
+
+        pin_package_manager(
+            &cwd,
+            PackageManagerType::Pnpm,
+            "10.18.0",
+            Some("sha512.explicit"),
+            true,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let content = tokio::fs::read_to_string(cwd.join("package.json")).await.unwrap();
+        assert!(content.contains("pnpm@10.18.0+sha512.explicit"));
+    }
+
+    #[test]
+    fn remove_last_package_manager_array_entry_removes_field() {
+        let mut manifest = serde_json::json!({
+            "devEngines": {
+                "packageManager": [{ "name": "pnpm", "version": "10.18.0" }],
+                "runtime": { "name": "node", "version": "22.0.0" }
+            }
+        });
+        assert!(remove_dev_engines_package_manager(
+            manifest.as_object_mut().unwrap(),
+            PackageManagerType::Pnpm,
+        ));
+        assert!(manifest["devEngines"].get("packageManager").is_none());
+        assert_eq!(manifest["devEngines"]["runtime"]["version"], "22.0.0");
+    }
+
+    #[tokio::test]
+    async fn package_manager_unpin_target_does_not_remove_node_pin() {
+        let temp_dir = TempDir::new().unwrap();
+        let cwd = AbsolutePathBuf::new(temp_dir.path().to_path_buf()).unwrap();
+        tokio::fs::write(cwd.join(".node-version"), "22.0.0\n").await.unwrap();
+        tokio::fs::write(
+            cwd.join("package.json"),
+            "{\n  \"packageManager\": \"pnpm@10.18.0\"\n}\n",
+        )
+        .await
+        .unwrap();
+
+        do_unpin_scope(&cwd, EnvScope::All, Some(PinTarget::PackageManager)).await.unwrap();
+
+        assert!(cwd.join(".node-version").as_path().exists());
+        let manifest = tokio::fs::read_to_string(cwd.join("package.json")).await.unwrap();
+        assert!(!manifest.contains("packageManager"));
+    }
 
     #[tokio::test]
     async fn test_show_pinned_no_file() {
@@ -681,192 +1148,221 @@ mod tests {
         let node_version_path = temp_path.join(".node-version");
         tokio::fs::write(&node_version_path, "20.18.0\n").await.unwrap();
 
-        // Unpin
-        let result = do_unpin(&temp_path, None).await;
-        assert!(result.is_ok());
+        // Unpin (scoped VP_HOME isolates the resolve-cache invalidation)
+        vp_shared::EnvConfig::scoped_async(|_| async {
+            let result = do_unpin(&temp_path, None).await;
+            assert!(result.is_ok());
+        })
+        .await;
 
         // File should be gone
         assert!(!tokio::fs::try_exists(&node_version_path).await.unwrap());
     }
 
     #[tokio::test]
-    // Run serially: mutates VP_HOME env var which affects invalidate_cache()
-    #[serial]
     async fn test_do_unpin_invalidates_cache() {
         let temp_dir = TempDir::new().unwrap();
         let temp_path = AbsolutePathBuf::new(temp_dir.path().to_path_buf()).unwrap();
 
-        // Point VP_HOME to temp dir
-        unsafe {
-            std::env::set_var(vp_shared::env_vars::VP_HOME, temp_path.as_path());
-        }
+        // Pin VP_HOME to the temp dir so invalidate_cache() targets our file
+        vp_shared::EnvConfig::with_vars_async(
+            [(env_vars::VP_HOME, temp_path.as_path())],
+            |_| async {
+                // Create cache file manually
+                let cache_dir = temp_path.join("cache");
+                std::fs::create_dir_all(&cache_dir).unwrap();
+                let cache_file = cache_dir.join("resolve_cache.json");
+                std::fs::write(&cache_file, r#"{"version":2,"entries":{}}"#).unwrap();
+                assert!(
+                    std::fs::metadata(cache_file.as_path()).is_ok(),
+                    "Cache file should exist before unpin"
+                );
 
-        // Create cache file manually
-        let cache_dir = temp_path.join("cache");
-        std::fs::create_dir_all(&cache_dir).unwrap();
-        let cache_file = cache_dir.join("resolve_cache.json");
-        std::fs::write(&cache_file, r#"{"version":2,"entries":{}}"#).unwrap();
-        assert!(
-            std::fs::metadata(cache_file.as_path()).is_ok(),
-            "Cache file should exist before unpin"
-        );
+                // Create .node-version and unpin
+                let node_version_path = temp_path.join(".node-version");
+                tokio::fs::write(&node_version_path, "20.18.0\n").await.unwrap();
+                let result = do_unpin(&temp_path, None).await;
+                assert!(result.is_ok());
 
-        // Create .node-version and unpin
-        let node_version_path = temp_path.join(".node-version");
-        tokio::fs::write(&node_version_path, "20.18.0\n").await.unwrap();
-        let result = do_unpin(&temp_path, None).await;
-        assert!(result.is_ok());
-
-        // Cache file should be removed by invalidate_cache()
-        assert!(
-            std::fs::metadata(cache_file.as_path()).is_err(),
-            "Cache file should be removed after unpin"
-        );
-
-        // Cleanup
-        unsafe {
-            std::env::remove_var(vp_shared::env_vars::VP_HOME);
-        }
+                // Cache file should be removed by invalidate_cache()
+                assert!(
+                    std::fs::metadata(cache_file.as_path()).is_err(),
+                    "Cache file should be removed after unpin"
+                );
+            },
+        )
+        .await;
     }
 
-    // Run serially: mutates VP_HOME env var which affects invalidate_cache()
     #[tokio::test]
-    #[serial]
     async fn test_do_pin_invalidates_cache() {
         let temp_dir = TempDir::new().unwrap();
         let temp_path = AbsolutePathBuf::new(temp_dir.path().to_path_buf()).unwrap();
+        let vp_home = shared_vp_home();
 
-        // Point VP_HOME to temp dir
-        unsafe {
-            std::env::set_var(vp_shared::env_vars::VP_HOME, temp_path.as_path());
-        }
+        vp_shared::EnvConfig::with_vars_async(
+            [(env_vars::VP_HOME, vp_home.as_os_str())],
+            |_| async {
+                // Create cache file manually
+                let cache_dir = vp_home.join("cache");
+                std::fs::create_dir_all(&cache_dir).unwrap();
+                let cache_file = cache_dir.join("resolve_cache.json");
+                std::fs::write(&cache_file, r#"{"version":2,"entries":{}}"#).unwrap();
+                assert!(
+                    std::fs::metadata(cache_file.as_path()).is_ok(),
+                    "Cache file should exist before pin"
+                );
 
-        // Create cache file manually
-        let cache_dir = temp_path.join("cache");
-        std::fs::create_dir_all(&cache_dir).unwrap();
-        let cache_file = cache_dir.join("resolve_cache.json");
-        std::fs::write(&cache_file, r#"{"version":2,"entries":{}}"#).unwrap();
-        assert!(
-            std::fs::metadata(cache_file.as_path()).is_ok(),
-            "Cache file should exist before pin"
-        );
+                // Pin an exact version (no_install=true to skip download, force=true to skip prompt)
+                let result = do_pin(&temp_path, "20.18.0", true, true, None).await;
+                assert!(result.is_ok());
 
-        // Pin an exact version (no_install=true to skip download, force=true to skip prompt)
-        let result = do_pin(&temp_path, "20.18.0", true, true, None).await;
-        assert!(result.is_ok());
+                // .node-version should be created
+                let node_version_path = temp_path.join(".node-version");
+                assert!(tokio::fs::try_exists(&node_version_path).await.unwrap());
+                let content = tokio::fs::read_to_string(&node_version_path).await.unwrap();
+                assert_eq!(content.trim(), "20.18.0");
 
-        // .node-version should be created
-        let node_version_path = temp_path.join(".node-version");
-        assert!(tokio::fs::try_exists(&node_version_path).await.unwrap());
-        let content = tokio::fs::read_to_string(&node_version_path).await.unwrap();
-        assert_eq!(content.trim(), "20.18.0");
-
-        // Cache file should be removed by invalidate_cache()
-        assert!(
-            std::fs::metadata(cache_file.as_path()).is_err(),
-            "Cache file should be removed after pin"
-        );
-
-        // Cleanup
-        unsafe {
-            std::env::remove_var(vp_shared::env_vars::VP_HOME);
-        }
+                // Cache file should be removed by invalidate_cache()
+                assert!(
+                    std::fs::metadata(cache_file.as_path()).is_err(),
+                    "Cache file should be removed after pin"
+                );
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_do_unpin_no_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let temp_path = AbsolutePathBuf::new(temp_dir.path().to_path_buf()).unwrap();
+        vp_shared::EnvConfig::scoped_async(|_| async {
+            let temp_dir = TempDir::new().unwrap();
+            let temp_path = AbsolutePathBuf::new(temp_dir.path().to_path_buf()).unwrap();
 
-        // Should not error when no file exists
-        let result = do_unpin(&temp_path, None).await;
-        assert!(result.is_ok());
+            // Should not error when no file exists
+            let result = do_unpin(&temp_path, None).await;
+            assert!(result.is_ok());
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn test_do_pin_targets_dev_engines_when_package_json_exists() {
-        let temp_dir = TempDir::new().unwrap();
-        let temp_path = AbsolutePathBuf::new(temp_dir.path().to_path_buf()).unwrap();
+        let vp_home = shared_vp_home();
+        vp_shared::EnvConfig::with_vars_async(
+            [(env_vars::VP_HOME, vp_home.as_os_str())],
+            |_| async {
+                let temp_dir = TempDir::new().unwrap();
+                let temp_path = AbsolutePathBuf::new(temp_dir.path().to_path_buf()).unwrap();
 
-        // package.json without .node-version: the pin goes into devEngines.runtime
-        tokio::fs::write(
+                // package.json without .node-version: the pin goes into devEngines.runtime
+                tokio::fs::write(
             temp_path.join("package.json"),
             "{\n  \"name\": \"test\",\n  \"engines\": {\n    \"node\": \">=18.0.0\"\n  }\n}\n",
         )
         .await
         .unwrap();
 
-        let result = do_pin(&temp_path, "20.18.0", true, true, None).await;
-        assert!(result.is_ok());
+                let result = do_pin(&temp_path, "20.18.0", true, true, None).await;
+                assert!(result.is_ok());
 
-        // .node-version is NOT created
-        assert!(!tokio::fs::try_exists(temp_path.join(".node-version")).await.unwrap());
+                // .node-version is NOT created
+                assert!(!tokio::fs::try_exists(temp_path.join(".node-version")).await.unwrap());
 
-        let content = tokio::fs::read_to_string(temp_path.join("package.json")).await.unwrap();
-        let pkg: serde_json::Value = serde_json::from_str(&content).unwrap();
-        let entry = &pkg["devEngines"]["runtime"];
-        assert_eq!(entry["name"].as_str().unwrap(), "node");
-        assert_eq!(entry["version"].as_str().unwrap(), "20.18.0");
-        assert_eq!(entry["onFail"].as_str().unwrap(), "download");
-        // existing engines.node is kept unchanged
-        assert_eq!(pkg["engines"]["node"].as_str().unwrap(), ">=18.0.0");
-        // devEngines is placed right after engines
-        let keys: Vec<&str> = pkg.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, ["name", "engines", "devEngines"]);
+                let content =
+                    tokio::fs::read_to_string(temp_path.join("package.json")).await.unwrap();
+                let pkg: serde_json::Value = serde_json::from_str(&content).unwrap();
+                let entry = &pkg["devEngines"]["runtime"];
+                assert_eq!(entry["name"].as_str().unwrap(), "node");
+                assert_eq!(entry["version"].as_str().unwrap(), "20.18.0");
+                assert_eq!(entry["onFail"].as_str().unwrap(), "download");
+                // existing engines.node is kept unchanged
+                assert_eq!(pkg["engines"]["node"].as_str().unwrap(), ">=18.0.0");
+                // devEngines is placed right after engines
+                let keys: Vec<&str> = pkg.as_object().unwrap().keys().map(String::as_str).collect();
+                assert_eq!(keys, ["name", "engines", "devEngines"]);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_do_pin_keeps_node_version_file_target_when_it_exists() {
-        let temp_dir = TempDir::new().unwrap();
-        let temp_path = AbsolutePathBuf::new(temp_dir.path().to_path_buf()).unwrap();
+        let vp_home = shared_vp_home();
+        vp_shared::EnvConfig::with_vars_async(
+            [(env_vars::VP_HOME, vp_home.as_os_str())],
+            |_| async {
+                let temp_dir = TempDir::new().unwrap();
+                let temp_path = AbsolutePathBuf::new(temp_dir.path().to_path_buf()).unwrap();
 
-        tokio::fs::write(temp_path.join(".node-version"), "18.20.0\n").await.unwrap();
-        tokio::fs::write(temp_path.join("package.json"), "{\n  \"name\": \"test\"\n}\n")
-            .await
-            .unwrap();
+                tokio::fs::write(temp_path.join(".node-version"), "18.20.0\n").await.unwrap();
+                tokio::fs::write(temp_path.join("package.json"), "{\n  \"name\": \"test\"\n}\n")
+                    .await
+                    .unwrap();
 
-        // force=true skips the overwrite prompt
-        let result = do_pin(&temp_path, "20.18.0", true, true, None).await;
-        assert!(result.is_ok());
+                // force=true skips the overwrite prompt
+                let result = do_pin(&temp_path, "20.18.0", true, true, None).await;
+                assert!(result.is_ok());
 
-        // .node-version keeps winning for writes (compatibility-first)
-        let content = tokio::fs::read_to_string(temp_path.join(".node-version")).await.unwrap();
-        assert_eq!(content.trim(), "20.18.0");
+                // .node-version keeps winning for writes (compatibility-first)
+                let content =
+                    tokio::fs::read_to_string(temp_path.join(".node-version")).await.unwrap();
+                assert_eq!(content.trim(), "20.18.0");
 
-        // package.json is untouched
-        let pkg = tokio::fs::read_to_string(temp_path.join("package.json")).await.unwrap();
-        assert!(!pkg.contains("devEngines"));
+                // package.json is untouched
+                let pkg = tokio::fs::read_to_string(temp_path.join("package.json")).await.unwrap();
+                assert!(!pkg.contains("devEngines"));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_do_pin_explicit_dev_engines_target_wins_over_node_version_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let temp_path = AbsolutePathBuf::new(temp_dir.path().to_path_buf()).unwrap();
+        let vp_home = shared_vp_home();
+        vp_shared::EnvConfig::with_vars_async(
+            [(env_vars::VP_HOME, vp_home.as_os_str())],
+            |_| async {
+                let temp_dir = TempDir::new().unwrap();
+                let temp_path = AbsolutePathBuf::new(temp_dir.path().to_path_buf()).unwrap();
 
-        tokio::fs::write(temp_path.join(".node-version"), "18.20.0\n").await.unwrap();
-        tokio::fs::write(temp_path.join("package.json"), "{\n  \"name\": \"test\"\n}\n")
-            .await
-            .unwrap();
+                tokio::fs::write(temp_path.join(".node-version"), "18.20.0\n").await.unwrap();
+                tokio::fs::write(temp_path.join("package.json"), "{\n  \"name\": \"test\"\n}\n")
+                    .await
+                    .unwrap();
 
-        let result = do_pin(&temp_path, "20.18.0", true, true, Some(PinTarget::DevEngines)).await;
-        assert!(result.is_ok());
+                let result =
+                    do_pin(&temp_path, "20.18.0", true, true, Some(PinTarget::DevEngines)).await;
+                assert!(result.is_ok());
 
-        // devEngines is written; .node-version stays untouched (a warning is printed)
-        let content = tokio::fs::read_to_string(temp_path.join("package.json")).await.unwrap();
-        let pkg: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(pkg["devEngines"]["runtime"]["version"].as_str().unwrap(), "20.18.0");
-        let node_version =
-            tokio::fs::read_to_string(temp_path.join(".node-version")).await.unwrap();
-        assert_eq!(node_version.trim(), "18.20.0");
+                // devEngines is written; .node-version stays untouched (a warning is printed)
+                let content =
+                    tokio::fs::read_to_string(temp_path.join("package.json")).await.unwrap();
+                let pkg: serde_json::Value = serde_json::from_str(&content).unwrap();
+                assert_eq!(pkg["devEngines"]["runtime"]["version"].as_str().unwrap(), "20.18.0");
+                let node_version =
+                    tokio::fs::read_to_string(temp_path.join(".node-version")).await.unwrap();
+                assert_eq!(node_version.trim(), "18.20.0");
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_do_pin_dev_engines_target_requires_package_json() {
-        let temp_dir = TempDir::new().unwrap();
-        let temp_path = AbsolutePathBuf::new(temp_dir.path().to_path_buf()).unwrap();
+        let vp_home = shared_vp_home();
+        vp_shared::EnvConfig::with_vars_async(
+            [(env_vars::VP_HOME, vp_home.as_os_str())],
+            |_| async {
+                let temp_dir = TempDir::new().unwrap();
+                let temp_path = AbsolutePathBuf::new(temp_dir.path().to_path_buf()).unwrap();
 
-        let result = do_pin(&temp_path, "20.18.0", true, true, Some(PinTarget::DevEngines)).await;
-        assert!(result.is_err());
+                let result =
+                    do_pin(&temp_path, "20.18.0", true, true, Some(PinTarget::DevEngines)).await;
+                assert!(result.is_err());
+            },
+        )
+        .await;
     }
 
     #[test]
@@ -932,30 +1428,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_do_unpin_dev_engines_default_when_no_node_version_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let temp_path = AbsolutePathBuf::new(temp_dir.path().to_path_buf()).unwrap();
+        vp_shared::EnvConfig::scoped_async(|_| async {
+            let temp_dir = TempDir::new().unwrap();
+            let temp_path = AbsolutePathBuf::new(temp_dir.path().to_path_buf()).unwrap();
 
-        tokio::fs::write(
-            temp_path.join("package.json"),
-            r#"{
+            tokio::fs::write(
+                temp_path.join("package.json"),
+                r#"{
   "name": "test",
   "devEngines": {
     "runtime": {"name": "node", "version": "^24.0.0"}
   }
 }
 "#,
-        )
-        .await
-        .unwrap();
+            )
+            .await
+            .unwrap();
 
-        let result = do_unpin(&temp_path, None).await;
-        assert!(result.is_ok());
+            let result = do_unpin(&temp_path, None).await;
+            assert!(result.is_ok());
 
-        let content = tokio::fs::read_to_string(temp_path.join("package.json")).await.unwrap();
-        let pkg: serde_json::Value = serde_json::from_str(&content).unwrap();
-        // the emptied devEngines object is cleaned up entirely
-        assert!(pkg.get("devEngines").is_none());
-        assert_eq!(pkg["name"].as_str().unwrap(), "test");
+            let content = tokio::fs::read_to_string(temp_path.join("package.json")).await.unwrap();
+            let pkg: serde_json::Value = serde_json::from_str(&content).unwrap();
+            // the emptied devEngines object is cleaned up entirely
+            assert!(pkg.get("devEngines").is_none());
+            assert_eq!(pkg["name"].as_str().unwrap(), "test");
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1050,22 +1549,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_version_for_pin_partial_version() {
-        let provider = NodeProvider::new();
+        let vp_home = shared_vp_home();
+        vp_shared::EnvConfig::with_vars_async(
+            [(env_vars::VP_HOME, vp_home.as_os_str())],
+            |_| async {
+                let provider = NodeProvider::new();
 
-        // Partial version "20" should resolve to an exact version like "20.x.y"
-        let (resolved, was_alias) = resolve_version_for_pin("20", &provider).await.unwrap();
-        assert!(was_alias, "partial version should be treated as alias");
+                // Partial version "20" should resolve to an exact version like "20.x.y"
+                let (resolved, was_alias) = resolve_version_for_pin("20", &provider).await.unwrap();
+                assert!(was_alias, "partial version should be treated as alias");
 
-        // The resolved version should be a full semver version starting with "20."
-        assert!(
-            resolved.starts_with("20."),
-            "expected resolved version to start with '20.', got: {resolved}"
-        );
+                // The resolved version should be a full semver version starting with "20."
+                assert!(
+                    resolved.starts_with("20."),
+                    "expected resolved version to start with '20.', got: {resolved}"
+                );
 
-        // Should be a valid exact version (major.minor.patch)
-        let parts: Vec<&str> = resolved.split('.').collect();
-        assert_eq!(parts.len(), 3, "expected 3 version parts, got: {resolved}");
-        assert!(parts.iter().all(|p| p.parse::<u64>().is_ok()), "all parts should be numeric");
+                // Should be a valid exact version (major.minor.patch)
+                let parts: Vec<&str> = resolved.split('.').collect();
+                assert_eq!(parts.len(), 3, "expected 3 version parts, got: {resolved}");
+                assert!(
+                    parts.iter().all(|p| p.parse::<u64>().is_ok()),
+                    "all parts should be numeric"
+                );
+            },
+        )
+        .await;
     }
 
     #[tokio::test]

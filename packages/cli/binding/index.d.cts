@@ -174,6 +174,38 @@ export interface MangleOptionsKeepNames {
   class: boolean;
 }
 
+export interface ManglePropertiesOptions {
+  /**
+   * JavaScript `RegExp` selecting property names to mangle. The source and flags are compiled
+   * with Rust's regex engine. Flags `i`, `m`, `s`, and `u` are supported.
+   */
+  include: RegExp;
+  /** JavaScript `RegExp` excluding property names selected by `include`. */
+  exclude?: RegExp;
+  /** Exact names that are neither mangled nor emitted as automatic output names. */
+  reserved?: Array<string>;
+  /**
+   * Mangle quoted property occurrences in addition to unquoted occurrences.
+   *
+   * @default false
+   */
+  quoted?: boolean;
+  /**
+   * Generate readable `_$name$_`-style output names.
+   *
+   * @default false
+   */
+  debug?: boolean;
+  /**
+   * Stable mappings from original names to output names. `false` reserves an original name.
+   * Entries that do not match `include`, or that match `exclude`, remain inert but are
+   * preserved in the returned `mangleCache`. String targets must be `IdentifierName` values
+   * other than `__proto__`, `constructor`, or `prototype`. The original name `__proto__` is
+   * always reserved and cannot be used as a cache key.
+   */
+  cache?: Record<string, string | false>;
+}
+
 /**
  * Minify asynchronously.
  *
@@ -190,6 +222,12 @@ export interface MinifyOptions {
   module?: boolean;
   compress?: boolean | CompressOptions;
   mangle?: boolean | MangleOptions;
+  /**
+   * Mangle matching property names independently of identifier mangling. Properties owned by
+   * unminified code, imported module namespaces, globals, or host APIs must be excluded or
+   * reserved.
+   */
+  mangleProps?: ManglePropertiesOptions;
   codegen?: boolean | CodegenOptions;
   sourcemap?: boolean;
 }
@@ -203,6 +241,11 @@ export interface MinifyResult {
    * Only populated when `codegen.legalComments` is `"linked"` or `"external"`.
    */
   legalComments: Array<string>;
+  /**
+   * Updated property-name cache sorted by original name. Present when `mangleProps` ran on a
+   * parse without errors.
+   */
+  mangleCache?: Record<string, string | false>;
 }
 
 /** Minify synchronously. */
@@ -1651,6 +1694,12 @@ export declare class BindingDevEngine {
    * actual module and its dependencies.
    */
   compileEntry(moduleId: string, clientId: string): Promise<BindingLazyChunkOutput>;
+  /**
+   * Same data the plugin-context `getModuleInfo` returns, readable from the engine
+   * handle at any time (no hook context needed).
+   */
+  getModuleInfo(moduleId: string): BindingModuleInfo | null;
+  getModuleIds(): Array<string>;
 }
 
 export declare class BindingLoadPluginContext {
@@ -1959,8 +2008,8 @@ export declare class TraceSubscriberGuard {
 }
 
 export declare class TsconfigCache {
-  /** Create a new transform cache with auto tsconfig discovery enabled. */
-  constructor(yarnPnp: boolean);
+  /** Create a new transform cache with auto or manual tsconfig discovery enabled. */
+  constructor(yarnPnp: boolean, pathToTsconfig?: string | undefined | null);
   /**
    * Clear the cache.
    *
@@ -2063,6 +2112,7 @@ export interface BindingChecksOptions {
   ineffectiveDynamicImport?: boolean;
   largeBarrelModules?: boolean;
   sourcemapBroken?: boolean;
+  namespaceConflict?: boolean;
 }
 
 export interface BindingChunkImportMap {
@@ -2244,9 +2294,10 @@ export interface BindingEnhancedTransformOptions {
   /**
    * Configure tsconfig handling.
    * - true: Auto-discover and load the nearest tsconfig.json
+   * - string: Use the tsconfig at the provided path
    * - TsconfigRawOptions: Use the provided inline tsconfig options
    */
-  tsconfig?: boolean | BindingTsconfigRawOptions;
+  tsconfig?: boolean | string | BindingTsconfigRawOptions;
   /** An input source map to collapse with the output source map. */
   inputMap?: SourceMap;
 }
@@ -2657,8 +2708,8 @@ export interface BindingManualCodeSplittingOptions {
 }
 
 export interface BindingMatchGroup {
-  name: string | ((id: string, ctx: BindingChunkingContext) => VoidNullable<string>);
-  test?: string | RegExp | ((id: string) => VoidNullable<boolean>);
+  name: string | ((ids: Array<string>, ctx: BindingChunkingContext) => Array<VoidNullable<string>>);
+  test?: string | RegExp | ((ids: Array<string>) => Uint8Array);
   priority?: number;
   minSize?: number;
   minShareCount?: number;
@@ -2680,6 +2731,22 @@ export interface BindingModuleSideEffectsRule {
   test?: RegExp | undefined;
   sideEffects: boolean;
   external?: boolean;
+}
+
+/**
+ * Counters of the Rust-side tracking allocator. V8 never allocates through
+ * the Rust global allocator, so these numbers exclude the JS heap and GC
+ * noise completely, unlike `process.memoryUsage()`.
+ */
+export interface BindingNativeMemoryStats {
+  /** Bytes currently allocated and not yet freed, since process start. */
+  liveBytes: number;
+  /** Highest `live_bytes` seen since process start or the last reset. */
+  peakBytes: number;
+  /** Successful `alloc` calls since the last reset. */
+  allocCount: number;
+  /** Successful `realloc` calls since the last reset. */
+  reallocCount: number;
 }
 
 export interface BindingOptimization {
@@ -2742,6 +2809,7 @@ export interface BindingOutputOptions {
 export interface BindingOutputs {
   chunks: Array<BindingOutputChunk>;
   assets: Array<BindingOutputAsset>;
+  mangleCache?: Record<string, string | false>;
 }
 
 export interface BindingOverwriteOptions {
@@ -2853,14 +2921,14 @@ export interface BindingPluginOptions {
   renderErrorMeta?: BindingPluginHookMeta;
   generateBundle?: (
     ctx: BindingPluginContext,
-    bundle: BindingErrorsOr<BindingOutputs>,
+    bundle: BindingResult<BindingOutputs>,
     isWrite: boolean,
     opts: BindingNormalizedOptions,
   ) => MaybePromise<VoidNullable<JsChangedOutputs>>;
   generateBundleMeta?: BindingPluginHookMeta;
   writeBundle?: (
     ctx: BindingPluginContext,
-    bundle: BindingErrorsOr<BindingOutputs>,
+    bundle: BindingResult<BindingOutputs>,
     opts: BindingNormalizedOptions,
   ) => MaybePromise<VoidNullable<JsChangedOutputs>>;
   writeBundleMeta?: BindingPluginHookMeta;
@@ -3154,6 +3222,7 @@ export interface BindingViteReporterPluginConfig {
 
 export interface BindingViteResolvePluginConfig {
   resolveOptions: BindingViteResolvePluginResolveOptions;
+  tsconfig?: string;
   environmentConsumer: string;
   environmentName: string;
   builtins: Array<BindingStringOrRegex>;
@@ -3199,6 +3268,7 @@ export interface BindingViteResolvePluginResolveOptions {
 
 export interface BindingViteTransformPluginConfig {
   root: string;
+  tsconfig?: string;
   include?: Array<BindingStringOrRegex>;
   exclude?: Array<BindingStringOrRegex>;
   jsxRefreshInclude?: Array<BindingStringOrRegex>;
@@ -3268,6 +3338,13 @@ export declare const enum FilterTokenKind {
   QueryValue = 'QueryValue',
 }
 
+/**
+ * Returns the Rust-side allocator counters, or `None` when this binding was
+ * built without the `tracking_allocator` cargo feature (the default —
+ * tracking costs a few atomic operations per allocation).
+ */
+export declare function getNativeMemoryStats(): BindingNativeMemoryStats | null;
+
 export declare function initTraceSubscriber(): TraceSubscriberGuard | null;
 
 export interface JsChangedOutputs {
@@ -3330,6 +3407,13 @@ export interface PreRenderedChunk {
 
 export declare function registerPlugins(id: number, plugins: Array<BindingPluginWithIndex>): void;
 
+/**
+ * Starts a new measuring window: the peak restarts from the current live
+ * bytes and the counts restart from zero. No-op when the binding was built
+ * without the `tracking_allocator` cargo feature.
+ */
+export declare function resetNativeMemoryStats(): void;
+
 export declare function resolveTsconfig(
   filename: string,
   cache: TsconfigCache | undefined | null,
@@ -3377,6 +3461,8 @@ export interface CliOptions {
   pack: (err: Error | null) => Promise<JsCommandResolvedResult>;
   doc: (err: Error | null) => Promise<JsCommandResolvedResult>;
   cwd?: string;
+  /** Whether the user supplied the global `-C` option. */
+  explicitChdir?: boolean;
   /** CLI arguments (should be process.argv.slice(2) from JavaScript) */
   args?: Array<string>;
   /** Generated toolchain manifest shipped with this vite-plus package. */
@@ -3385,6 +3471,32 @@ export interface CliOptions {
   vitePlusPackagePath: string;
   /** Read the vite.config.ts in the Node.js side and return the `lint` and `fmt` config JSON string back to the Rust side */
   resolveUniversalViteConfig: (err: Error | null, arg: string) => Promise<string>;
+}
+
+export interface CliParseError {
+  kind: string;
+  message: string;
+}
+
+export interface ConfigArgs {
+  hooksDir?: string;
+  hooks?: boolean;
+  agent?: boolean;
+}
+
+export interface CreateArgs {
+  templateName?: string;
+  directory?: string;
+  agent?: false | string | Array<string>;
+  editor?: false | string;
+  git?: boolean;
+  hooks?: boolean;
+  packageManager?: 'pnpm' | 'npm' | 'yarn' | 'bun';
+  approveBuilds?: boolean;
+  verbose?: boolean;
+  interactive?: boolean;
+  list?: boolean;
+  templateArgs: Array<string>;
 }
 
 /**
@@ -3476,6 +3588,14 @@ export interface DownloadPackageManagerResult {
 export declare function ensureBlockingStdio(): void;
 
 /**
+ * Resolved on-disk category roots from [`vp_shared::EnvConfig`].
+ *
+ * JavaScript must not read `VP_HOME` / `VP_*_DIR` / `XDG_*` itself;
+ * this is the JS surface of the same `EnvConfig::get().dirs` Rust uses.
+ */
+export declare function getVpDirs(): VpDirsJs;
+
+/**
  * Whether `config_key` is already declared as a top-level property in the
  * vite config's `defineConfig({...})` (or equivalent) object literal.
  *
@@ -3484,6 +3604,11 @@ export declare function ensureBlockingStdio(): void;
  * for unrecognized shapes (e.g. `return $VAR` from a callback).
  */
 export declare function hasConfigKey(viteConfigPath: string, configKey: string): boolean;
+
+export interface HooksArgs {
+  command: 'enable' | 'disable' | 'status';
+  hooksDir?: string;
+}
 
 /** Result returned by JavaScript resolver functions. */
 export interface JsCommandResolvedResult {
@@ -3566,6 +3691,50 @@ export declare function mergeTsdownConfig(
   viteConfigPath: string,
   tsdownConfigPath: string,
 ): MergeJsonConfigResult;
+
+export interface MigrateArgs {
+  path?: string;
+  agent?: false | string | Array<string>;
+  editor?: false | string;
+  hooks?: boolean;
+  interactive?: boolean;
+  full?: boolean;
+}
+
+export declare function parseConfigArgs(argv: Array<string>): ParseConfigArgsOutcome;
+
+export type ParseConfigArgsOutcome =
+  | { status: 'ok'; value: ConfigArgs }
+  | { status: 'exit'; code: number }
+  | { status: 'error'; error: CliParseError };
+
+export declare function parseCreateArgs(argv: Array<string>): ParseCreateArgsOutcome;
+
+export type ParseCreateArgsOutcome =
+  | { status: 'ok'; value: CreateArgs }
+  | { status: 'exit'; code: number }
+  | { status: 'error'; error: CliParseError };
+
+export declare function parseHooksArgs(argv: Array<string>): ParseHooksArgsOutcome;
+
+export type ParseHooksArgsOutcome =
+  | { status: 'ok'; value: HooksArgs }
+  | { status: 'exit'; code: number }
+  | { status: 'error'; error: CliParseError };
+
+export declare function parseMigrateArgs(argv: Array<string>): ParseMigrateArgsOutcome;
+
+export type ParseMigrateArgsOutcome =
+  | { status: 'ok'; value: MigrateArgs }
+  | { status: 'exit'; code: number }
+  | { status: 'error'; error: CliParseError };
+
+export declare function parseStagedArgs(argv: Array<string>): ParseStagedArgsOutcome;
+
+export type ParseStagedArgsOutcome =
+  | { status: 'ok'; value: StagedArgs }
+  | { status: 'exit'; code: number }
+  | { status: 'error'; error: CliParseError };
 
 /** Access modes for a path. */
 export interface PathAccess {
@@ -3751,6 +3920,24 @@ export interface RunCommandResult {
  */
 export declare function shouldPrintVitePlusHeader(): boolean;
 
+export interface StagedArgs {
+  allowEmpty?: boolean;
+  concurrent?: boolean | number;
+  continueOnError?: boolean;
+  cwd?: string;
+  debug?: boolean;
+  diff?: string;
+  diffFilter?: string;
+  failOnChanges?: boolean;
+  hidePartiallyStaged?: boolean;
+  hideUnstaged?: boolean;
+  quiet?: boolean;
+  relative?: boolean;
+  revert?: boolean;
+  stash?: boolean;
+  verbose?: boolean;
+}
+
 /**
  * Set the value of a top-level config key in a vite config file (upsert)
  *
@@ -3792,6 +3979,15 @@ export declare function upsertJsonConfig(
 
 /** Render the Vite+ header using the Rust implementation. */
 export declare function vitePlusHeader(): string;
+
+/** Resolved on-disk category roots from [`vp_shared::EnvConfig`]. */
+export interface VpDirsJs {
+  bin: string;
+  data: string;
+  cache: string;
+  config: string;
+  state: string;
+}
 
 /**
  * Wrap safe inline `plugins: [...]` arrays in recognized Vite config objects

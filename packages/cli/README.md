@@ -9,7 +9,7 @@ This package provides the project-local version of Vite+. The global `vp` comman
 
 Vite+ is the unified entry point for local web development. It combines [Vite](https://vite.dev/), [Vitest](https://vitest.dev/), [Oxlint](https://oxc.rs/docs/guide/usage/linter.html), [Oxfmt](https://oxc.rs/docs/guide/usage/formatter.html), [Rolldown](https://rolldown.rs/), [tsdown](https://tsdown.dev/), and [Vite Task](https://github.com/voidzero-dev/vite-task) into one zero-config toolchain that also manages runtime and package manager workflows:
 
-- **`vp env`:** Manage Node.js globally and per project
+- **`vp env`:** Manage Node.js and package managers globally and per project
 - **`vp install`:** Install dependencies with automatic package manager detection
 - **`vp dev`:** Run Vite's fast native ESM dev server with instant HMR
 - **`vp check`:** Run formatting, linting, and type checks in one command
@@ -96,9 +96,10 @@ Use `vp migrate` to migrate to Vite+. It merges tool-specific config files such 
 - **create** - Create a new project from a template
 - **migrate** - Migrate an existing project to Vite+
 - **config** - Configure hooks and agent integration
+- **hooks** - Manage the Git hook dispatcher
 - **staged** - Run linters on staged files
 - **install** (`i`) - Install dependencies
-- **env** - Manage Node.js versions
+- **env** - Manage Node.js and package managers
 
 #### Develop
 
@@ -200,7 +201,7 @@ Add package-manager overrides so that other packages use the Vite+ versions. Ali
 ```json
 "overrides": {
   "vite": "npm:@voidzero-dev/vite-plus-core@latest",
-  "vitest": "4.1.10"
+  "vitest": "4.1.11"
 }
 ```
 
@@ -209,7 +210,7 @@ If you are using `pnpm`, add this to your `pnpm-workspace.yaml`:
 ```yaml
 overrides:
   vite: npm:@voidzero-dev/vite-plus-core@latest
-  vitest: 4.1.10
+  vitest: 4.1.11
 ```
 
 Or, if you are using Yarn:
@@ -217,7 +218,7 @@ Or, if you are using Yarn:
 ```json
 "resolutions": {
   "vite": "npm:@voidzero-dev/vite-plus-core@latest",
-  "vitest": "4.1.10"
+  "vitest": "4.1.11"
 }
 ```
 
