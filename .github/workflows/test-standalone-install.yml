@@ -19,6 +19,8 @@ on:
       - 'crates/vp_shared/**'
       - 'crates/vp_pm_cli/**'
       - 'crates/vp_setup/**'
+      - '.github/scripts/test-install-bootstrap.sh'
+      - '.github/scripts/test-install-bootstrap.ps1'
       - '.github/workflows/test-standalone-install.yml'
 
 concurrency:
@@ -251,7 +253,12 @@ jobs:
           port_file="$case_dir/port"
           log_file="$case_dir/requests.jsonl"
           rm -rf "$case_dir"
-          mkdir -p "$case_dir"
+          mkdir -p "$case_dir/bin"
+
+          # Model a CLI whose setup already completed. Otherwise first-start
+          # setup creates current before the upgrade rejection is tested.
+          cp target/debug/vp "$case_dir/bin/vp"
+          touch "$case_dir/bin/.vp-setup-complete"
 
           node packages/cli/tests/fixtures/provenance-registry.mjs \
             --port-file "$port_file" \
@@ -287,7 +294,7 @@ jobs:
               CI=true \
               HOME="$home_dir" \
               VP_HOME="$vp_home" \
-              target/debug/vp upgrade "$TEST_VERSION" --registry "$registry" "$@" 2>&1)
+              "$case_dir/bin/vp" upgrade "$TEST_VERSION" --registry "$registry" "$@" 2>&1)
             status=$?
             set -e
             printf '%s\n' "$output"
