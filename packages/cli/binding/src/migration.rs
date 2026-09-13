@@ -201,6 +201,8 @@ pub struct BatchRewriteResult {
     pub preserved_vitest_files: Vec<String>,
     /// Files that had errors
     pub errors: Vec<BatchRewriteError>,
+    /// Pack configurations that need manual migration
+    pub warnings: Vec<BatchRewriteError>,
 }
 
 /// Merge tsdown config into vite config by importing it
@@ -290,11 +292,17 @@ pub fn wrap_lazy_plugins(vite_config_path: String) -> Result<MergeJsonConfigResu
 pub fn rewrite_imports_in_directory(
     root: String,
     preserve_vitest_in_nuxt_packages: Option<bool>,
+    oxlint_owner_dirs: Option<Vec<String>>,
 ) -> Result<BatchRewriteResult> {
     let result = vp_migration::rewrite_imports_in_directory_with_options(
         Path::new(&root),
         vp_migration::RewriteImportsOptions {
             preserve_vitest_in_nuxt_packages: preserve_vitest_in_nuxt_packages.unwrap_or(false),
+            oxlint_owner_dirs: oxlint_owner_dirs
+                .unwrap_or_default()
+                .into_iter()
+                .map(std::path::PathBuf::from)
+                .collect(),
         },
     )
     .map_err(anyhow::Error::from)?;
@@ -309,6 +317,14 @@ pub fn rewrite_imports_in_directory(
             .preserved_vitest_files
             .iter()
             .map(|p| p.to_string_lossy().to_string())
+            .collect(),
+        warnings: result
+            .warnings
+            .iter()
+            .map(|(p, m)| BatchRewriteError {
+                path: p.to_string_lossy().to_string(),
+                message: m.clone(),
+            })
             .collect(),
         errors: result
             .errors

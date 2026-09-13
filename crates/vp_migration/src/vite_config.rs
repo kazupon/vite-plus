@@ -405,13 +405,115 @@ fn wrap_lazy_plugins_content(
     Ok(MergeResult { content, updated: true, uses_function_callback })
 }
 
-fn pair_key_matches<D: Doc>(key_node: &Node<'_, D>, config_key: &str) -> bool {
+pub(crate) fn pair_key_matches<D: Doc>(key_node: &Node<'_, D>, config_key: &str) -> bool {
     let text = key_node.text();
     match key_node.kind().as_ref() {
         "property_identifier" => text == config_key,
         "string" => text.trim_matches(|c| c == '"' || c == '\'' || c == '`') == config_key,
         _ => false,
     }
+}
+
+/// Make declaration-generator selection explicit for tsdown 0.23.
+/// Only inspect config objects, leaving plugin options and computed values alone.
+pub(crate) fn rewrite_pack_dts_generators(content: &str, standalone: bool) -> String {
+    let grep = SupportLang::TypeScript.ast_grep(content);
+    let root = grep.root();
+    let mut edits = Vec::new();
+    for node in root.dfs() {
+        if node.kind() != "pair"
+            || !node.field("key").is_some_and(|key| pair_key_matches(&key, "dts"))
+        {
+            continue;
+        }
+        let Some(config) = node.parent() else { continue };
+        if !crate::pack_config::is_pack_object(&config, standalone)
+            || !crate::pack_config::can_edit_object(&config)
+            || crate::pack_config::external_skip_needs_manual_migration(&config)
+        {
+            continue;
+        }
+        let Some(options) = node.field("value").filter(|value| value.kind() == "object") else {
+            continue;
+        };
+        if !crate::pack_config::can_edit_object(&options) {
+            continue;
+        }
+        let children: Vec<_> = options.children().collect();
+        // A spread, computed key, or dynamic selector can affect precedence.
+        if children.iter().any(|child| {
+            child.kind() == "spread_element"
+                || child.kind() == "method_definition"
+                || child.kind() == "shorthand_property_identifier"
+                    && matches!(child.text().as_ref(), "tsgo" | "oxc")
+                || child.field("key").is_some_and(|key| key.kind() == "computed_property_name")
+                || (child.field("key").is_some_and(|key| {
+                    pair_key_matches(&key, "tsgo") || pair_key_matches(&key, "oxc")
+                }) && child.field("value").is_some_and(|value| {
+                    !matches!(value.kind().as_ref(), "true" | "false" | "object")
+                }))
+        }) {
+            continue;
+        }
+        let has_generator = children.iter().any(|child| {
+            child.field("key").is_some_and(|key| pair_key_matches(&key, "generator"))
+                || child.kind() == "shorthand_property_identifier" && child.text() == "generator"
+        });
+        let mut generator = None;
+        let mut boolean_options = Vec::new();
+        for (index, child) in children.iter().enumerate() {
+            let Some(key) = child.field("key") else { continue };
+            let name = if pair_key_matches(&key, "tsgo") {
+                "tsgo"
+            } else if pair_key_matches(&key, "oxc") {
+                "oxc"
+            } else {
+                continue;
+            };
+            let Some(value) = child.field("value") else { continue };
+            if !matches!(value.kind().as_ref(), "true" | "false" | "object") {
+                continue;
+            }
+            if value.kind() != "false" && (generator.is_none() || name == "tsgo") {
+                generator = Some((index, name));
+            }
+            if value.kind() != "object" {
+                boolean_options.push(index);
+            }
+        }
+        if !has_generator
+            && let Some((index, name)) = generator
+            && children[index].field("value").is_some_and(|value| value.kind() == "object")
+        {
+            let start = options.range().start + 1;
+            edits.push((start..start, format!(" generator: '{name}',")));
+        }
+        for index in boolean_options {
+            let child = &children[index];
+            if !has_generator
+                && let Some((selected, name)) = generator
+                && selected == index
+            {
+                if let (Some(key), Some(value)) = (child.field("key"), child.field("value")) {
+                    edits.push((key.range(), "generator".to_owned()));
+                    edits.push((value.range(), format!("'{name}'")));
+                }
+                continue;
+            }
+            edits.push((child.range(), crate::pack_config::property_comments(child)));
+            if let Some(comma) = children[index + 1..].iter().find(|n| n.kind() != "comment")
+                && comma.kind() == ","
+            {
+                edits.push((comma.range(), String::new()));
+            }
+        }
+    }
+    edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+    let mut result = content.to_owned();
+    for (range, replacement) in edits {
+        result.replace_range(range, &replacement);
+    }
+    result
 }
 
 fn is_commonjs_config(content: &str, path: Option<&Path>) -> bool {
@@ -495,7 +597,7 @@ static RE_NAMESPACE_LAZY_PLUGINS_IMPORT: LazyLock<Regex> =
 /// returns inside nested functions (e.g. an inline plugin's `config()` hook)
 /// do NOT match, so destructive edits never touch them. Used by transforms
 /// that rewrite in place (`wrap_lazy_plugins`, `upsert_json_config`).
-fn is_direct_recognized_config_object<D: Doc>(object_node: &Node<'_, D>) -> bool {
+pub(crate) fn is_direct_recognized_config_object<D: Doc>(object_node: &Node<'_, D>) -> bool {
     let Some(parent) = object_node.parent() else { return false };
     match parent.kind().as_ref() {
         "export_statement" => true,
@@ -815,12 +917,9 @@ fn indent_multiline(s: &str, spaces: usize) -> String {
     let indent = " ".repeat(spaces);
     let lines: Vec<&str> = s.lines().collect();
 
-    if lines.len() <= 1 {
-        return s.to_string();
-    }
-
     // First line doesn't get indented (it's on the same line as the key)
     // Subsequent lines get the specified indent
+    // Join even single-line input so the generated comma stays inside the YAML block.
     lines
         .iter()
         .enumerate()
@@ -896,6 +995,57 @@ fn merge_tsdown_config_content(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_rewrite_pack_dts_generators() {
+        for (input, standalone, expected) in [
+            (
+                "export default defineConfig({ dts: { tsgo: true, sourcemap: true } });",
+                true,
+                "export default defineConfig({ dts: { generator: 'tsgo', sourcemap: true } });",
+            ),
+            (
+                "export default { pack: [{ dts: { 'oxc': true } }, { dts: { tsgo: false } }] };",
+                false,
+                "export default { pack: [{ dts: { generator: 'oxc' } }, { dts: {  } }] };",
+            ),
+            (
+                "export default { pack: { dts: { generator: 'tsc', tsgo: true, oxc: false } } };",
+                false,
+                "export default { pack: { dts: { generator: 'tsc',   } } };",
+            ),
+            (
+                "export default defineConfig([{ dts: { oxc: true, tsgo: true } }]);",
+                true,
+                "export default defineConfig([{ dts: {  generator: 'tsgo' } }]);",
+            ),
+            (
+                "export default { pack: { dts: { tsgo: true /* keep */, sourcemap: true } } };",
+                false,
+                "export default { pack: { dts: { generator: 'tsgo' /* keep */, sourcemap: true } } };",
+            ),
+        ] {
+            let actual = super::rewrite_pack_dts_generators(input, standalone);
+            assert_eq!(actual, expected);
+            assert_eq!(super::rewrite_pack_dts_generators(&actual, standalone), actual);
+        }
+    }
+
+    #[test]
+    fn test_rewrite_pack_dts_generators_preserves_other_options() {
+        for input in [
+            "export default { plugins: [plugin({ dts: { tsgo: true } })] };",
+            "export default { test: { pack: { dts: { tsgo: true } } } };",
+            "export default { pack: { dts: { tsgo: enabled } } };",
+            "export default { pack: { dts: { tsgo: enabled, oxc: true } } };",
+            "export default { pack: { dts: { tsgo, oxc: true } } };",
+            "export default { pack: { dts: { tsgo: true, oxc } } };",
+            "export default { pack: { dts: { ...options, tsgo: true } } };",
+            "export default { pack: { dts: { [key]: value, tsgo: true } } };",
+        ] {
+            assert_eq!(super::rewrite_pack_dts_generators(input, false), input);
+        }
+    }
+
     use std::io::Write;
 
     use tempfile::tempdir;
@@ -1734,6 +1884,31 @@ export default defineConfig({});"#;
         let input = "first\nsecond\nthird";
         let expected = "first\n    second\n    third";
         assert_eq!(indent_multiline(input, 4), expected);
+    }
+
+    #[test]
+    fn test_indent_multiline_trailing_line_endings() {
+        for ending in ["\n", "\r\n"] {
+            assert_eq!(indent_multiline(&format!("single line{ending}"), 4), "single line");
+            assert_eq!(
+                indent_multiline(&format!("first{ending}second{ending}"), 4),
+                "first\n    second"
+            );
+        }
+    }
+
+    #[test]
+    fn test_merge_single_line_json_config_with_trailing_line_endings() {
+        let vite_config = "export default defineConfig({ plugins: [] });";
+        for ending in ["", "\n", "\r\n"] {
+            let oxfmt_config = format!("{{\"singleQuote\":true}}{ending}");
+            let result = merge_json_config_content(vite_config, &oxfmt_config, "fmt").unwrap();
+            assert!(result.updated);
+            assert_eq!(
+                result.content,
+                "export default defineConfig({\n  fmt: {\"singleQuote\":true},\n  plugins: []\n});"
+            );
+        }
     }
 
     #[test]

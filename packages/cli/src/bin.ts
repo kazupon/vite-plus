@@ -1,7 +1,7 @@
 /**
  * Unified entry point for both the local CLI (via bin/vp) and the global CLI (via Rust vp binary).
  *
- * Global commands (create, migrate, config, hooks, staged, --version) are handled by tsdown-bundled modules.
+ * Global commands (create, migrate, sync-versions, config, hooks, staged, --version) are handled by tsdown-bundled modules.
  * All other commands are delegated to the Rust core through NAPI bindings, which
  * uses JavaScript tool resolver functions to locate tool binaries.
  *
@@ -21,7 +21,6 @@ import { fmt } from './resolve-fmt.ts';
 import { lint } from './resolve-lint.ts';
 import { pack } from './resolve-pack.ts';
 import { test } from './resolve-test.ts';
-import { resolveUniversalViteConfig } from './resolve-vite-config.ts';
 import { vite } from './resolve-vite.ts';
 import { accent, errorMsg, log } from './utils/terminal.ts';
 
@@ -117,6 +116,8 @@ if (maybePrintCommandHelp(args)) {
   await import('./create/bin.js');
 } else if (command === 'migrate') {
   await import('./migration/bin.js');
+} else if (command === 'sync-versions') {
+  await import('./sync-versions/bin.js');
 } else if (command === 'config') {
   await import('./config/bin.js');
 } else if (command === 'hooks') {
@@ -128,6 +129,9 @@ if (maybePrintCommandHelp(args)) {
 } else {
   // All other commands — delegate to Rust core via NAPI binding
   try {
+    // This module imports `vitest/config` through define-config. Load it here
+    // so `migrate` and `config` can handle stale aliases before Vitest loads.
+    const { resolveUniversalViteConfig } = await import('./resolve-vite-config.js');
     const initInspection = inspectInitCommand(command, args.slice(1));
     if (
       initInspection.handled &&
@@ -142,6 +146,7 @@ if (maybePrintCommandHelp(args)) {
     }
 
     const exitCode = await run({
+      nodeExecPath: process.execPath,
       lint,
       pack,
       fmt,

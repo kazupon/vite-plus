@@ -8,7 +8,11 @@ import { parseAllDocuments, parse as parseYaml } from 'yaml';
 
 import { rewriteScripts } from '../../../binding/index.js';
 import { PackageManager } from '../../types/index.js';
-import { VITE_PLUS_OVERRIDE_PACKAGES, VITEST_VERSION } from '../../utils/constants.js';
+import {
+  SETUP_VP_VERSION,
+  VITE_PLUS_OVERRIDE_PACKAGES,
+  VITEST_VERSION,
+} from '../../utils/constants.js';
 import { createMigrationReport } from '../report.js';
 
 // Mock VITE_PLUS_VERSION to a stable value for snapshot tests.
@@ -40,6 +44,7 @@ const {
   parseNvmrcVersion,
   detectNodeVersionManagerFile,
   migrateNodeVersionManagerFile,
+  migrateSetupVpVersion,
   detectFramework,
   hasFrameworkShim,
   addFrameworkShim,
@@ -627,10 +632,9 @@ describe('rewritePackageJson', () => {
     expect(pkg.devDependencies).not.toHaveProperty('@vitest/browser');
   });
 
-  it('pins the provider framework peer to a lockstep sibling instead of * (npmx.dev #27)', () => {
-    // `playwright` and `@playwright/test` release in lockstep, so a newly-added
-    // `playwright` peer should reuse the pinned @playwright/test version rather
-    // than a non-deterministic `*`.
+  it('does not add playwright when @playwright/test already provides it', () => {
+    // `@playwright/test` has a dependency on `playwright`,
+    // so adding a second direct dependency is redundant.
     const pkg = {
       devDependencies: {
         '@vitest/browser-playwright': '^4.0.0',
@@ -639,7 +643,7 @@ describe('rewritePackageJson', () => {
       },
     };
     rewritePackageJson(pkg, PackageManager.pnpm);
-    expect(pkg.devDependencies).toHaveProperty('playwright', '1.60.0');
+    expect(pkg.devDependencies).not.toHaveProperty('playwright');
   });
 
   it('injects a direct vite devDependency for an npm project that uses an opt-in browser provider', async () => {
@@ -1443,6 +1447,125 @@ describe('setPackageManager', () => {
     expect(readPkg().devEngines).toEqual({
       packageManager: { name: 'pnpm', version: '11.5.1', onFail: 'download' },
     });
+  });
+});
+
+describe('migrateSetupVpVersion', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vp-test-setup-vp-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('updates exact v1 references in workflows and composite actions', () => {
+    const workflowsDir = path.join(tmpDir, '.github', 'workflows');
+    const actionDir = path.join(tmpDir, '.github', 'actions', 'setup');
+    fs.mkdirSync(path.join(workflowsDir, 'nested'), { recursive: true });
+    fs.mkdirSync(actionDir, { recursive: true });
+
+    const workflowPath = path.join(workflowsDir, 'ci.yml');
+    fs.writeFileSync(
+      workflowPath,
+      [
+        'steps:',
+        '  - uses: voidzero-dev/setup-vp@v1',
+        "  - uses: 'voidzero-dev/setup-vp@v1' # keep this comment",
+        '  - uses: "voidzero-dev/setup-vp@v1"',
+        '  - uses: voidzero-dev/setup-vp@v1.16.1',
+        '  - uses: voidzero-dev/setup-vp@v10',
+        '  - uses: voidzero-dev/setup-vp@313600b',
+        '  # - uses: voidzero-dev/setup-vp@v1',
+        '',
+      ].join('\r\n'),
+    );
+    const actionPath = path.join(actionDir, 'action.yaml');
+    fs.writeFileSync(
+      actionPath,
+      'runs:\n  using: composite\n  steps:\n    - uses : voidzero-dev/setup-vp@v1\n',
+    );
+    const nestedWorkflowPath = path.join(workflowsDir, 'nested', 'ignored.yml');
+    fs.writeFileSync(nestedWorkflowPath, '- uses: voidzero-dev/setup-vp@v1\n');
+    const report = createMigrationReport();
+
+    const updatedFiles = migrateSetupVpVersion(tmpDir, report).map((filePath) =>
+      filePath.split(path.sep).join('/'),
+    );
+
+    expect(updatedFiles).toHaveLength(2);
+    expect(updatedFiles).toEqual(
+      expect.arrayContaining(['.github/workflows/ci.yml', '.github/actions/setup/action.yaml']),
+    );
+    expect(fs.readFileSync(workflowPath, 'utf8')).toBe(
+      [
+        'steps:',
+        `  - uses: voidzero-dev/setup-vp@${SETUP_VP_VERSION}`,
+        `  - uses: 'voidzero-dev/setup-vp@${SETUP_VP_VERSION}' # keep this comment`,
+        `  - uses: "voidzero-dev/setup-vp@${SETUP_VP_VERSION}"`,
+        '  - uses: voidzero-dev/setup-vp@v1.16.1',
+        '  - uses: voidzero-dev/setup-vp@v10',
+        '  - uses: voidzero-dev/setup-vp@313600b',
+        '  # - uses: voidzero-dev/setup-vp@v1',
+        '',
+      ].join('\r\n'),
+    );
+    expect(fs.readFileSync(actionPath, 'utf8')).toContain(
+      `uses : voidzero-dev/setup-vp@${SETUP_VP_VERSION}`,
+    );
+    expect(fs.readFileSync(nestedWorkflowPath, 'utf8')).toContain('setup-vp@v1');
+    expect(report.setupVpVersionUpdatedFileCount).toBe(2);
+
+    expect(migrateSetupVpVersion(tmpDir, report)).toEqual([]);
+    expect(report.setupVpVersionUpdatedFileCount).toBe(2);
+  });
+
+  it('updates composite actions elsewhere under .github and stays within that directory', () => {
+    const actionPath = path.join(tmpDir, '.github', 'ci', 'actions', 'setup', 'action.yml');
+    const nonCompositePath = path.join(
+      tmpDir,
+      '.github',
+      'ci',
+      'actions',
+      'javascript',
+      'action.yml',
+    );
+    const outsideScopePath = path.join(tmpDir, 'ci', 'actions', 'outside-scope', 'action.yml');
+    const compositeAction =
+      'runs:\n  using: composite\n  steps:\n    - uses: voidzero-dev/setup-vp@v1\n';
+    const nonCompositeAction = [
+      'inputs:',
+      '  example:',
+      '    description: Example workflow text',
+      '    default: |',
+      '      - uses: voidzero-dev/setup-vp@v1',
+      'runs:',
+      '  using: node20',
+      '  main: index.js',
+      '',
+    ].join('\n');
+
+    fs.mkdirSync(path.dirname(actionPath), { recursive: true });
+    fs.mkdirSync(path.dirname(nonCompositePath), { recursive: true });
+    fs.mkdirSync(path.dirname(outsideScopePath), { recursive: true });
+    fs.writeFileSync(actionPath, compositeAction);
+    fs.writeFileSync(nonCompositePath, nonCompositeAction);
+    fs.writeFileSync(outsideScopePath, compositeAction);
+    const report = createMigrationReport();
+
+    const updatedFiles = migrateSetupVpVersion(tmpDir, report).map((filePath) =>
+      filePath.split(path.sep).join('/'),
+    );
+
+    expect(updatedFiles).toEqual(['.github/ci/actions/setup/action.yml']);
+    expect(fs.readFileSync(actionPath, 'utf8')).toContain(
+      `uses: voidzero-dev/setup-vp@${SETUP_VP_VERSION}`,
+    );
+    expect(fs.readFileSync(nonCompositePath, 'utf8')).toBe(nonCompositeAction);
+    expect(fs.readFileSync(outsideScopePath, 'utf8')).toBe(compositeAction);
+    expect(report.setupVpVersionUpdatedFileCount).toBe(1);
   });
 });
 
@@ -3282,6 +3405,56 @@ describe('ensureVitePlusBootstrap', () => {
       catalog: Record<string, string>;
     };
     expect(workspace.catalog['@vitest/browser-playwright']).toBe(VITEST_VERSION);
+    expect(detectVitePlusBootstrapPending(tmpDir, PackageManager.pnpm)).toBe(false);
+  });
+
+  it('does not add playwright on upgrade when @playwright/test already provides it', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, 'package.json'),
+      JSON.stringify({
+        name: 'browser-app',
+        devDependencies: {
+          '@playwright/test': '1.60.0',
+          'vite-plus': 'catalog:',
+        },
+        devEngines: {
+          packageManager: { name: 'pnpm', version: '10.33.0', onFail: 'download' },
+        },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, 'vite.config.ts'),
+      [
+        "import { defineConfig } from 'vite-plus';",
+        "import { playwright } from 'vite-plus/test/browser-playwright';",
+        'export default defineConfig({ test: { browser: { enabled: true, provider: playwright() } } });',
+      ].join('\n'),
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, 'pnpm-workspace.yaml'),
+      [
+        'catalog:',
+        '  vite-plus: latest',
+        '  vite: npm:@voidzero-dev/vite-plus-core@latest',
+        'overrides:',
+        "  vite: 'catalog:'",
+        'peerDependencyRules:',
+        '  allowAny: [vite]',
+        '  allowedVersions:',
+        "    vite: '*'",
+        '',
+      ].join('\n'),
+    );
+
+    expect(detectVitePlusBootstrapPending(tmpDir, PackageManager.pnpm)).toBe(true);
+    ensureVitePlusBootstrap(makeWorkspaceInfo(tmpDir, PackageManager.pnpm));
+
+    const pkg = readJson(path.join(tmpDir, 'package.json')) as {
+      devDependencies: Record<string, string>;
+    };
+    expect(pkg.devDependencies).not.toHaveProperty('playwright');
+    expect(pkg.devDependencies.vitest).toBe('catalog:');
+    expect(pkg.devDependencies['@vitest/browser-playwright']).toBe('catalog:');
     expect(detectVitePlusBootstrapPending(tmpDir, PackageManager.pnpm)).toBe(false);
   });
 
@@ -8623,6 +8796,8 @@ describe('existing Vite+ core migration finalization', () => {
       scripts: true,
       tsconfigTypes: true,
       imports: true,
+      oxcConfigs: false,
+      tsdownConfig: false,
     });
 
     const pkg = readJson(path.join(tmpDir, 'package.json')) as {
@@ -8653,6 +8828,96 @@ describe('existing Vite+ core migration finalization', () => {
     });
   });
 
+  it.each(['.oxfmtrc.json', '.oxfmtrc.jsonc'])(
+    'finishes a leftover %s config and remains idempotent',
+    (configFile) => {
+      fs.writeFileSync(
+        path.join(tmpDir, 'package.json'),
+        JSON.stringify({ name: 'test', devDependencies: { 'vite-plus': 'latest' } }),
+      );
+      fs.writeFileSync(path.join(tmpDir, 'vite.config.ts'), 'export default {};\n');
+      fs.writeFileSync(path.join(tmpDir, configFile), '{"singleQuote":true,"semi":false}\n');
+      const workspaceInfo = makeWorkspaceInfo(tmpDir, PackageManager.npm);
+      const report = createMigrationReport();
+
+      expect(finalizeCoreMigrationForExistingVitePlus(workspaceInfo, true, report).oxcConfigs).toBe(
+        true,
+      );
+      const config = fs.readFileSync(path.join(tmpDir, 'vite.config.ts'), 'utf8');
+      expect(config).toContain('fmt:');
+      expect(config).toContain('"singleQuote":true');
+      expect(config).toContain('"semi":false');
+      expect(fs.existsSync(path.join(tmpDir, configFile))).toBe(false);
+      expect(report.mergedConfigCount).toBe(1);
+      expect(finalizeCoreMigrationForExistingVitePlus(workspaceInfo, true).oxcConfigs).toBe(false);
+      expect(fs.readFileSync(path.join(tmpDir, 'vite.config.ts'), 'utf8')).toBe(config);
+    },
+  );
+
+  it('finishes leftover lint and format configs in workspace packages', () => {
+    const appDir = path.join(tmpDir, 'packages', 'app');
+    fs.mkdirSync(appDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, 'package.json'),
+      JSON.stringify({ name: 'root', devDependencies: { 'vite-plus': 'latest' } }),
+    );
+    fs.writeFileSync(path.join(appDir, 'package.json'), JSON.stringify({ name: 'app' }));
+    fs.writeFileSync(path.join(appDir, '.oxfmtrc.json'), '{"singleQuote":true}\n');
+    fs.writeFileSync(path.join(appDir, '.oxlintrc.json'), '{"rules":{"no-console":"error"}}\n');
+    const workspaceInfo = {
+      ...makeWorkspaceInfo(tmpDir, PackageManager.pnpm),
+      isMonorepo: true,
+      packages: [{ name: 'app', path: 'packages/app' }],
+    };
+
+    expect(finalizeCoreMigrationForExistingVitePlus(workspaceInfo, true).oxcConfigs).toBe(true);
+    const config = fs.readFileSync(path.join(appDir, 'vite.config.ts'), 'utf8');
+    expect(config).toContain('fmt:');
+    expect(config).toContain('lint:');
+    expect(config).toMatch(/"no-console":\s*"error"/);
+    expect(fs.existsSync(path.join(appDir, '.oxfmtrc.json'))).toBe(false);
+    expect(fs.existsSync(path.join(appDir, '.oxlintrc.json'))).toBe(false);
+    expect(finalizeCoreMigrationForExistingVitePlus(workspaceInfo, true).oxcConfigs).toBe(false);
+  });
+
+  it('preserves existing inline config when removing a redundant standalone config', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, 'package.json'),
+      JSON.stringify({ name: 'test', devDependencies: { 'vite-plus': 'latest' } }),
+    );
+    const config = 'export default { fmt: { singleQuote: false } };\n';
+    fs.writeFileSync(path.join(tmpDir, 'vite.config.ts'), config);
+    fs.writeFileSync(path.join(tmpDir, '.oxfmtrc.json'), '{"singleQuote":true}\n');
+    const workspaceInfo = makeWorkspaceInfo(tmpDir, PackageManager.npm);
+
+    expect(finalizeCoreMigrationForExistingVitePlus(workspaceInfo, true).oxcConfigs).toBe(true);
+    expect(fs.readFileSync(path.join(tmpDir, 'vite.config.ts'), 'utf8')).toBe(config);
+    expect(fs.existsSync(path.join(tmpDir, '.oxfmtrc.json'))).toBe(false);
+    expect(finalizeCoreMigrationForExistingVitePlus(workspaceInfo, true).oxcConfigs).toBe(false);
+  });
+
+  it('keeps an unmergeable config and reports the incomplete migration', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, 'package.json'),
+      JSON.stringify({ name: 'test', devDependencies: { 'vite-plus': 'latest' } }),
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, 'vite.config.ts'),
+      'const config = {}; export default config;\n',
+    );
+    fs.writeFileSync(path.join(tmpDir, '.oxfmtrc.json'), '{"singleQuote":true}\n');
+    const report = createMigrationReport();
+
+    const result = finalizeCoreMigrationForExistingVitePlus(
+      makeWorkspaceInfo(tmpDir, PackageManager.npm),
+      true,
+      report,
+    );
+    expect(result.oxcConfigs).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, '.oxfmtrc.json'))).toBe(true);
+    expect(report.warnings.some((warning) => warning.includes('Failed to merge'))).toBe(true);
+  });
+
   it('detects package-level legacy signals in workspaces', () => {
     const appDir = path.join(tmpDir, 'packages', 'app');
     fs.mkdirSync(appDir, { recursive: true });
@@ -8676,6 +8941,122 @@ describe('existing Vite+ core migration finalization', () => {
       scripts: Record<string, string>;
     };
     expect(appPkg.scripts.dev).toBe('vp dev');
+  });
+
+  it('finishes leftover Oxc and tsdown configs together and remains idempotent', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, 'package.json'),
+      JSON.stringify({ name: 'test', devDependencies: { 'vite-plus': 'latest' } }),
+    );
+    fs.writeFileSync(path.join(tmpDir, 'vite.config.ts'), 'export default {};\n');
+    fs.writeFileSync(path.join(tmpDir, '.oxfmtrc.json'), '{"singleQuote":true,"semi":false}\n');
+    fs.writeFileSync(
+      path.join(tmpDir, 'tsdown.config.ts'),
+      "import { defineConfig } from 'tsdown'; export default defineConfig({ entry: 'src/index.ts' });\n",
+    );
+    const workspaceInfo = makeWorkspaceInfo(tmpDir, PackageManager.pnpm);
+
+    const result = finalizeCoreMigrationForExistingVitePlus(workspaceInfo, true);
+    expect(result.oxcConfigs).toBe(true);
+    expect(result.tsdownConfig).toBe(true);
+    const config = fs.readFileSync(path.join(tmpDir, 'vite.config.ts'), 'utf8');
+    expect(config).toContain('pack: tsdownConfig');
+    expect(config).toContain('"singleQuote":true');
+    expect(config).toContain('"semi":false');
+    expect(fs.existsSync(path.join(tmpDir, '.oxfmtrc.json'))).toBe(false);
+    expect(fs.readFileSync(path.join(tmpDir, 'tsdown.config.ts'), 'utf8')).toContain(
+      "from 'vite-plus/pack'",
+    );
+    expect(finalizeCoreMigrationForExistingVitePlus(workspaceInfo, true)).toEqual({
+      scripts: false,
+      tsconfigTypes: false,
+      imports: false,
+      oxcConfigs: false,
+      tsdownConfig: false,
+    });
+    expect(fs.readFileSync(path.join(tmpDir, 'vite.config.ts'), 'utf8')).toBe(config);
+  });
+
+  it('makes a leftover tsdown config discoverable in an existing Vite+ project', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, 'package.json'),
+      JSON.stringify({ name: 'test', devDependencies: { 'vite-plus': 'latest' } }, null, 2),
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, 'tsdown.config.ts'),
+      `import { defineConfig } from 'tsdown';
+
+export default defineConfig({
+  entry: { index: 'src/index.ts', utils: 'src/utils.ts' },
+});
+`,
+    );
+
+    const workspaceInfo = makeWorkspaceInfo(tmpDir, PackageManager.pnpm);
+    expect(finalizeCoreMigrationForExistingVitePlus(workspaceInfo, true)).toEqual({
+      scripts: false,
+      tsconfigTypes: false,
+      imports: true,
+      tsdownConfig: true,
+      oxcConfigs: false,
+    });
+    expect(fs.readFileSync(path.join(tmpDir, 'vite.config.ts'), 'utf8')).toContain(
+      "import tsdownConfig from './tsdown.config.js';",
+    );
+    expect(fs.readFileSync(path.join(tmpDir, 'vite.config.ts'), 'utf8')).toContain(
+      'pack: tsdownConfig',
+    );
+    expect(fs.readFileSync(path.join(tmpDir, 'tsdown.config.ts'), 'utf8')).toContain(
+      "from 'vite-plus/pack'",
+    );
+
+    expect(finalizeCoreMigrationForExistingVitePlus(workspaceInfo, true)).toEqual({
+      scripts: false,
+      tsconfigTypes: false,
+      imports: false,
+      tsdownConfig: false,
+      oxcConfigs: false,
+    });
+  });
+
+  it('preserves a tsdown config already wired to pack under a different import name', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, 'package.json'),
+      JSON.stringify({ name: 'test', devDependencies: { 'vite-plus': 'latest' } }, null, 2),
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, 'vite.config.ts'),
+      `import packConfig from './tsdown.config.js';
+
+export default { pack: packConfig({}) };
+`,
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, 'tsdown.config.ts'),
+      `import { defineConfig } from 'tsdown';
+
+export default defineConfig({ entry: 'src/index.ts' });
+`,
+    );
+
+    const originalViteConfig = fs.readFileSync(path.join(tmpDir, 'vite.config.ts'), 'utf8');
+    const report = createMigrationReport();
+    const result = finalizeCoreMigrationForExistingVitePlus(
+      makeWorkspaceInfo(tmpDir, PackageManager.pnpm),
+      true,
+      report,
+    );
+
+    expect(result).toEqual({
+      scripts: false,
+      tsconfigTypes: false,
+      imports: true,
+      tsdownConfig: false,
+      oxcConfigs: false,
+    });
+    expect(fs.readFileSync(path.join(tmpDir, 'vite.config.ts'), 'utf8')).toBe(originalViteConfig);
+    expect(report.tsdownImportCount).toBe(0);
+    expect(report.manualSteps).toEqual([]);
   });
 });
 

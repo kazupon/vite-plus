@@ -1,6 +1,6 @@
 {
   "name": "@voidzero-dev/vite-plus-core",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "The Unified Toolchain for the Web",
   "homepage": "https://viteplus.dev/guide",
   "bugs": {
@@ -114,21 +114,18 @@
     "@oxc-project/types": "catalog:",
     "lightningcss": "catalog:",
     "postcss": "^8.5.6",
-    "yuku-codegen": "^0.5.44",
-    "yuku-parser": "^0.5.44"
+    "yuku-codegen": "^0.9.3",
+    "yuku-parser": "^0.9.3"
   },
   "devDependencies": {
     "@ast-grep/napi": "^0.43.0",
-    "@babel/generator": "^7.28.5",
-    "@babel/parser": "^7.28.5",
-    "@babel/types": "^7.28.5",
     "@emnapi/core": "catalog:",
     "@emnapi/runtime": "catalog:",
     "@napi-rs/cli": "catalog:",
     "@oxc-node/cli": "catalog:",
     "@tsdown/css": "catalog:",
     "@tsdown/exe": "catalog:",
-    "@vitejs/devtools": "^0.4.12",
+    "@vitejs/devtools": "^0.7.1",
     "es-module-lexer": "^1.7.0",
     "hookable": "^6.0.1",
     "magic-string": "^0.30.21",
@@ -150,7 +147,7 @@
   "peerDependencies": {
     "@arethetypeswrong/core": "^0.18.1",
     "@types/node": "^20.19.0 || >=22.12.0",
-    "@vitejs/devtools": "^0.4.0 || ^0.5.0",
+    "@vitejs/devtools": "^0.7.1",
     "esbuild": "^0.27.0 || ^0.28.0",
     "jiti": ">=1.21.0",
     "less": "^4.0.0",
@@ -162,7 +159,7 @@
     "terser": "^5.16.0",
     "tsx": "^4.8.1",
     "typescript": "^5.0.0 || ^6.0.0 || ^7.0.0",
-    "unplugin-unused": "^0.5.0",
+    "unplugin-unused": ">=0.5.0",
     "unrun": "*",
     "yaml": "^2.4.2"
   },
@@ -226,8 +223,8 @@
     "node": "^20.19.0 || ^22.18.0 || >=24.11.0"
   },
   "bundledVersions": {
-    "vite": "8.2.2",
-    "rolldown": "1.2.6",
-    "tsdown": "0.22.14"
+    "vite": "8.3.0",
+    "rolldown": "1.2.8",
+    "tsdown": "0.23.0"
   }
 }

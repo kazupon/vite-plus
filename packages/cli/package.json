@@ -1,6 +1,6 @@
 {
   "name": "vite-plus",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "The Unified Toolchain for the Web",
   "homepage": "https://viteplus.dev/guide",
   "bugs": {
@@ -68,6 +68,15 @@
     "./lint": {
       "types": "./dist/lint.d.ts",
       "import": "./dist/lint.js"
+    },
+    "./lint/plugins": {
+      "types": "./dist/lint-plugins.d.ts",
+      "import": "./dist/lint-plugins.js",
+      "require": "./dist/lint-plugins.cjs"
+    },
+    "./lint/plugins-dev": {
+      "types": "./dist/lint-plugins-dev.d.ts",
+      "default": "./dist/lint-plugins-dev.js"
     },
     "./oxlint-plugin": {
       "module-sync": "./dist/oxlint-plugin.js",
@@ -368,10 +377,10 @@
     "@vitest/snapshot": "catalog:",
     "@vitest/spy": "catalog:",
     "@vitest/utils": "catalog:",
-    "@voidzero-dev/vite-plus-core": "workspace:*",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
+    "vite": "workspace:@voidzero-dev/vite-plus-core@*",
     "vitest": "catalog:"
   },
   "devDependencies": {
@@ -399,7 +408,6 @@
     "semver": "catalog:",
     "tsdown": "catalog:",
     "validate-npm-package-name": "catalog:",
-    "vite": "workspace:*",
     "yaml": "catalog:",
     "zod": "catalog:"
   },

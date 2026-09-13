@@ -306,6 +306,7 @@ export interface TreeShakeOptions {
    */
   invalidImportSideEffects?: boolean;
 }
+
 export interface Comment {
   type: 'Line' | 'Block';
   value: string;
@@ -332,6 +333,7 @@ export declare const enum Severity {
   Warning = 'Warning',
   Advice = 'Advice',
 }
+
 export declare class ParseResult {
   get program(): import('@oxc-project/types').Program;
   get module(): EcmaScriptModule;
@@ -610,6 +612,7 @@ export interface ValueSpan {
   start: number;
   end: number;
 }
+
 export declare class ResolverFactory {
   constructor(options?: NapiResolveOptions | undefined | null);
   static default(): ResolverFactory;
@@ -919,6 +922,7 @@ export interface TsconfigOptions {
    */
   references?: 'auto';
 }
+
 export interface SourceMap {
   file?: string;
   mappings: string;
@@ -929,6 +933,7 @@ export interface SourceMap {
   version: number;
   x_google_ignoreList?: Array<number>;
 }
+
 export interface ArrowFunctionsOptions {
   /**
    * This option enables the following:
@@ -1604,6 +1609,7 @@ export interface TypeScriptOptions {
    */
   rewriteImportExtensions?: 'rewrite' | 'remove' | boolean;
 }
+
 export declare class BindingBundleEndEventData {
   output: string;
   duration: number;
@@ -2180,6 +2186,7 @@ export interface BindingDevOptions {
   onAdditionalAssets?: undefined | ((output: BindingOutputs) => void | Promise<void>);
   rebuildStrategy?: BindingRebuildStrategy;
   watch?: BindingDevWatchOptions;
+  hotUpdate?: boolean;
 }
 
 export interface BindingDevtoolsOptions {
@@ -2705,6 +2712,7 @@ export interface BindingManualCodeSplittingOptions {
   maxSize?: number;
   minModuleSize?: number;
   maxModuleSize?: number;
+  internalInvalidateModuleInfoCache?: () => void;
 }
 
 export interface BindingMatchGroup {
@@ -3398,7 +3406,7 @@ export interface PreRenderedChunk {
   /** Whether this chunk is a dynamic entry point. */
   isDynamicEntry: boolean;
   /** The id of a module that this chunk corresponds to. */
-  facadeModuleId?: string;
+  facadeModuleId: string | null;
   /** The list of ids of modules included in this chunk. */
   moduleIds: Array<string>;
   /** Exported variable names from this chunk. */
@@ -3434,6 +3442,7 @@ export declare function startAsyncRuntime(): void;
 export interface ViteImportGlobMeta {
   isSubImportsPattern?: boolean;
 }
+
 /** Error from batch import rewriting */
 export interface BatchRewriteError {
   /** The file path that had an error */
@@ -3450,16 +3459,20 @@ export interface BatchRewriteResult {
   preservedVitestFiles: Array<string>;
   /** Files that had errors */
   errors: Array<BatchRewriteError>;
+  /** Pack configurations that need manual migration */
+  warnings: Array<BatchRewriteError>;
 }
 
 /** Configuration options passed from JavaScript to Rust. */
 export interface CliOptions {
-  lint: (err: Error | null) => Promise<JsCommandResolvedResult>;
-  fmt: (err: Error | null) => Promise<JsCommandResolvedResult>;
-  vite: (err: Error | null) => Promise<JsCommandResolvedResult>;
-  test: (err: Error | null) => Promise<JsCommandResolvedResult>;
-  pack: (err: Error | null) => Promise<JsCommandResolvedResult>;
-  doc: (err: Error | null) => Promise<JsCommandResolvedResult>;
+  /** The current JavaScript runtime (`process.execPath`). */
+  nodeExecPath: string;
+  lint: (err: Error | null, arg: JsCommandContext) => Promise<JsCommandResolvedResult>;
+  fmt: (err: Error | null, arg: JsCommandContext) => Promise<JsCommandResolvedResult>;
+  vite: (err: Error | null, arg: JsCommandContext) => Promise<JsCommandResolvedResult>;
+  test: (err: Error | null, arg: JsCommandContext) => Promise<JsCommandResolvedResult>;
+  pack: (err: Error | null, arg: JsCommandContext) => Promise<JsCommandResolvedResult>;
+  doc: (err: Error | null, arg: JsCommandContext) => Promise<JsCommandResolvedResult>;
   cwd?: string;
   /** Whether the user supplied the global `-C` option. */
   explicitChdir?: boolean;
@@ -3608,6 +3621,12 @@ export declare function hasConfigKey(viteConfigPath: string, configKey: string):
 export interface HooksArgs {
   command: 'enable' | 'disable' | 'status';
   hooksDir?: string;
+}
+
+/** Execution context after command dispatch selects the working directory. */
+export interface JsCommandContext {
+  cwd: string;
+  args: Array<string>;
 }
 
 /** Result returned by JavaScript resolver functions. */
@@ -3794,6 +3813,7 @@ export declare function rewriteEslint(scriptsJson: string): string | null;
 export declare function rewriteImportsInDirectory(
   root: string,
   preserveVitestInNuxtPackages?: boolean | undefined | null,
+  oxlintOwnerDirs?: Array<string> | undefined | null,
 ): BatchRewriteResult;
 
 /**

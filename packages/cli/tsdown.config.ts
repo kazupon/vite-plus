@@ -49,6 +49,8 @@ export default defineConfig([
       'define-config': './src/define-config.ts',
       fmt: './src/fmt.ts',
       lint: './src/lint.ts',
+      'lint-plugins': './src/lint-plugins.ts',
+      'lint-plugins-dev': './src/lint-plugins-dev.ts',
       'oxlint-plugin': './src/oxlint-plugin.ts',
       'tsgolint-path': './src/utils/tsgolint-path.ts',
       pack: './src/pack.ts',
@@ -58,6 +60,7 @@ export default defineConfig([
       'create/bin': './src/create/bin.ts',
       'migration/bin': './src/migration/bin.ts',
       'migration/compat/worker': './src/migration/compat/worker.ts',
+      'sync-versions/bin': './src/sync-versions/bin.ts',
       version: './src/version.ts',
       'config/bin': './src/config/bin.ts',
       'hooks/bin': './src/hooks/bin.ts',
@@ -82,12 +85,38 @@ export default defineConfig([
     plugins: [fixVersionsPathPlugin, inlineLintStagedVersionPlugin],
   },
 
+  // Standalone machine protocol shipped with the prebuilt `vp` archive.
+  // Keep this as one self-contained file so Containerbase can extract the
+  // verified release asset without installing npm dependencies.
+  {
+    name: 'sync-versions',
+    entry: {
+      'sync-versions/bin': './src/sync-versions/bin.ts',
+    },
+    outDir: 'dist',
+    format: 'esm',
+    fixedExtension: true,
+    dts: false,
+    clean: false,
+    outputOptions: {
+      codeSplitting: false,
+    },
+    inputOptions: {
+      resolve: {
+        mainFields: ['module', 'main'],
+      },
+    },
+  },
+
   // CJS — dual-format entries
   {
     name: 'cli-cjs',
     entry: {
       'define-config': './src/define-config.ts',
       index: './src/index.cts',
+      // Match @oxlint/plugins' CJS support for compiled plugins. plugins-dev
+      // uses its ESM entry for both import and require, matching upstream.
+      'lint-plugins': './src/lint-plugins.ts',
     },
     outDir: 'dist',
     format: 'cjs',

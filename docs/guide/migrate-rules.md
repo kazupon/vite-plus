@@ -39,6 +39,52 @@ When a default upgrade skips setup actions that would apply, it prints a hint
 to run `vp migrate --full`. Fresh (non Vite+) projects always run the full
 migration.
 
+## Pack Configuration
+
+`vp migrate` updates static `pack` objects in `vite.config.*` and exported
+objects in `tsdown.config.*` for [tsdown 0.23](https://github.com/rolldown/tsdown/releases/tag/v0.23.0).
+This also runs on existing Vite+ projects without `--full`, including workspace
+packages. Arrays and direct objects returned by `defineConfig` callbacks are
+supported. JSON tsdown configs receive the same updates after they merge into
+`vite.config.ts`.
+
+| Previous option                                                    | Updated option                                                                        |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| `bundle: false`                                                    | `unbundle: true`                                                                      |
+| `bundle: true`                                                     | Removed; bundling remains the default                                                 |
+| `outExtension`                                                     | `outExtensions`                                                                       |
+| `publicDir`                                                        | `copy`                                                                                |
+| `removeNodeProtocol: true`                                         | `nodeProtocol: 'strip'`                                                               |
+| `injectStyle`                                                      | `css.inject`                                                                          |
+| `inlineOnly` / `deps.onlyAllowBundle`                              | `deps.onlyBundle`                                                                     |
+| `noExternal`                                                       | `deps.alwaysBundle`                                                                   |
+| `skipNodeModulesBundle: true` / `deps.skipNodeModulesBundle: true` | `deps.neverBundle: true`                                                              |
+| `dts.tsgo` / `dts.oxc`                                             | Select with `dts.generator`; retain generator option objects and remove boolean flags |
+| `dts.cjsReexport`                                                  | Removed; tsdown generates CJS declarations separately                                 |
+| `--public-dir` in `tsdown` or `vp pack` scripts                    | `--copy`                                                                              |
+
+Migration preserves the previous defaults by setting `deps.resolveDepSubpath`
+to `true` when absent. Enabled ATTW checks receive `profile: 'strict'` when
+no profile is set. Explicit values, including `false`, remain unchanged.
+
+`noExternal` moves to `deps.alwaysBundle`, preserving matcher expressions,
+references, and callback methods. Existing `deps.alwaysBundle` values remain
+unchanged.
+
+When `external` accompanies either `skipNodeModulesBundle` form, static matchers
+and references to local constants move to `inputOptions.external` before
+`deps.neverBundle` is set. Constant declarations and references stay intact.
+This preserves the original matching rules, including external file paths. Unsupported matchers,
+conflicting `inputOptions`, and declaration-specific dependency rules leave the
+pack object unchanged and produce a manual-migration warning.
+
+The transform does not evaluate configuration code. Objects with spreads,
+computed keys, or duplicate keys, and conflicting old and new options require
+manual review. Dynamic boolean selectors remain unchanged. Unrelated Vite and
+plugin options remain unchanged. Run `vp pack` after migration to check the
+result. Node.js requirements, TypeScript module resolution, and programmatic
+`build()` return values require separate review.
+
 ## Dependency Rules
 
 What happens to each toolchain dependency, at a glance:
@@ -204,6 +250,44 @@ surface are written against `vite-plus` by hand.
   needed.
 - Existing `vite-plus/test*` imports are left unchanged.
 
+### Oxlint JS Plugin Imports
+
+Vite+ bundles Oxlint, so the migration removes a standalone `oxlint`
+dependency. Your own Oxlint JS plugins import the authoring API by name. That
+import stops resolving when the dependency goes away. `vp lint` then fails to
+load the plugin.
+
+The migration repoints those imports at Vite+:
+
+- It rewrites `@oxlint/plugins` to `vite-plus/lint/plugins`.
+- It rewrites `oxlint/plugins-dev` to `vite-plus/lint/plugins-dev`.
+- It rewrites `oxlint` to `vite-plus/lint/plugins` when the import names a
+  binding from the authoring API, such as `defineRule`, `definePlugin`, or
+  `Context`. Older Oxlint releases exposed that API from the main entry. It now
+  lives in `@oxlint/plugins`.
+
+An import through Vite+ always matches the version of Oxlint that Vite+
+bundles. You pin no second package. The import also resolves from any package
+that already depends on `vite-plus`.
+
+The migration leaves three forms alone:
+
+- `oxlint` imports that name only the config surface, such as `defineConfig`,
+  `OxlintConfig`, or `OxlintOverride`. These still resolve against the
+  standalone package.
+- Default and namespace `oxlint` imports. They name no binding, so the
+  migration cannot tell the two surfaces apart.
+- Bare side-effect `oxlint` imports, for the same reason.
+
+The migration also skips a package that declares `oxlint` or `@oxlint/plugins`
+in `dependencies` or `peerDependencies`, or `@oxlint/plugins` in
+`optionalDependencies`. These dependencies can supply a published Oxlint plugin.
+Its consumers may not run Vite+.
+
+The cleanup retains a development dependency on `@oxlint/plugins` when source,
+package import aliases, or built plugins still reference it. This includes
+ignored output in directories such as `dist`, `build`, and `out`.
+
 ### What Is Never Rewritten
 
 - `declare module 'vitest'` and `declare module '@vitest/browser*'`: module
@@ -252,6 +336,14 @@ as `run` or `--`:
 
 Unrelated `bunx` commands and other package-executor forms remain unchanged.
 
+## Continuous Integration Rules
+
+Migration replaces exact `voidzero-dev/setup-vp@v1` references in GitHub
+Actions workflows and composite actions under `.github` with the latest exact
+`setup-vp` release known to that Vite+ version. The frozen `v1` tag does not
+receive new releases. Existing exact versions and commit SHAs are left
+unchanged.
+
 ## Node.js Version Rules
 
 Migration converts legacy Node.js version-manager files to `.node-version`,
@@ -263,8 +355,9 @@ migrations run it unconditionally.
   existing `.node-version` is kept.
 - When `.nvmrc` is removed, any `actions/setup-node` `node-version-file:
 .nvmrc` reference in `.github/workflows/*.{yml,yaml}` and composite actions
-  (`.github/actions/**/action.{yml,yaml}`) is repointed to `.node-version` so
-  CI does not fail with "node version file ... does not exist".
+  under `.github` (`.github/**/action.{yml,yaml}`) is repointed to
+  `.node-version` so CI does not fail with "node version file ... does not
+  exist".
 
 ## Package-Manager Rules
 

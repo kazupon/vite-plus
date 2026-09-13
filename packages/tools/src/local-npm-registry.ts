@@ -537,7 +537,8 @@ const server = createServer(async (req, res) => {
 
 // Registry env for every package manager, each of which reads its own
 // spelling: npm and bun honor NPM_CONFIG_REGISTRY, pnpm >= 10.6 only reads
-// PNPM_CONFIG_* (older pnpm read the lowercase npm_config_* form), and Yarn
+// PNPM_CONFIG_* (pnpm 11.0 requires lowercase pnpm_config_*; older pnpm
+// read the lowercase npm_config_* form), and Yarn
 // Berry only reads YARN_-prefixed settings and refuses plain-http registries
 // unless the host is whitelisted.
 //
@@ -553,10 +554,17 @@ function buildRegistryEnv(registry: string): Record<string, string> {
   const noProxy = [process.env.NO_PROXY ?? process.env.no_proxy, '127.0.0.1']
     .filter(Boolean)
     .join(',');
+  // Windows CI snapshot jobs put TEMP on a ReFS Dev Drive, where Bun's
+  // cache/temp renames can fail with ENOTSUP. Keep its throwaway cache in
+  // the user profile and its temporary files on the same filesystem.
+  const bunCacheRoot =
+    process.platform === 'win32' && process.env.CI != null ? homedir() : tmpdir();
+  const bunCacheDir = mkdtempSync(path.join(bunCacheRoot, 'vp-local-registry-bun-'));
   return {
     NPM_CONFIG_REGISTRY: registry,
     npm_config_registry: registry,
     PNPM_CONFIG_REGISTRY: registry,
+    pnpm_config_registry: registry,
     YARN_NPM_REGISTRY_SERVER: registry,
     YARN_UNSAFE_HTTP_WHITELIST: '127.0.0.1',
     NO_PROXY: noProxy,
@@ -564,7 +572,8 @@ function buildRegistryEnv(registry: string): Record<string, string> {
     NPM_CONFIG_NOPROXY: noProxy,
     npm_config_noproxy: noProxy,
     YARN_GLOBAL_FOLDER: mkdtempSync(path.join(tmpdir(), 'vp-local-registry-yarn-')),
-    BUN_INSTALL_CACHE_DIR: mkdtempSync(path.join(tmpdir(), 'vp-local-registry-bun-')),
+    BUN_INSTALL_CACHE_DIR: bunCacheDir,
+    BUN_TMPDIR: path.join(bunCacheDir, '.tmp'),
   };
 }
 
