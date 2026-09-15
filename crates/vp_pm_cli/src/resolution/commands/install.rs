@@ -74,7 +74,7 @@ pub struct InstallArgs {
     pub(crate) filter: Vec<String>,
 
     /// Install in workspace root only
-    #[arg(short = 'w', long, not_supported(bun))]
+    #[arg(short = 'w', long, not_supported(yarn, bun))]
     pub(crate) workspace_root: bool,
 
     /// Save exact version (only when adding packages)
@@ -162,6 +162,7 @@ impl InstallArgs {
             save_catalog_name: None,
             save_catalog: self.save_catalog,
             allow_build: None,
+            ignore_scripts: self.ignore_scripts,
             filter: self.filter,
             workspace_root: self.workspace_root,
             workspace: false,
@@ -227,7 +228,6 @@ impl Yarn {
             .arg_if("--ignore-scripts", args.ignore_scripts)
             .arg_if("--silent", args.silent)
             .arg_if("--no-lockfile", args.no_lockfile)
-            .arg_if("-W", args.workspace_root)
             .extend(args.pass_through_args.iter());
         cmd.into()
     }

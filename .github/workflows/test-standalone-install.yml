@@ -11,6 +11,7 @@ on:
       - 'packages/cli/tests/fixtures/provenance-registry.mjs'
       - 'packages/cli/install-legacy.sh'
       - 'packages/cli/install-legacy.ps1'
+      - '.github/scripts/test-install-legacy-remote.ps1'
       - 'packages/tools/src/install-global-cli.ts'
       - 'packages/tools/src/local-npm-registry.ts'
       - 'crates/vp_installer/**'
@@ -477,7 +478,7 @@ jobs:
             exit 1
           fi
           cat "$OUTPUT"
-          grep -F "Set VP_BIN_DIR, VP_DATA_DIR, and VP_CACHE_DIR together" "$OUTPUT"
+          grep -F "Set all three variables together: VP_BIN_DIR, VP_DATA_DIR, and VP_CACHE_DIR." "$OUTPUT"
 
       - name: Existing GitHub setup-vp uses legacy layout
         run: |
@@ -555,14 +556,15 @@ jobs:
           test "$CONFIG_DIR" = "$(dump_dir config)"
           test "$STATE_DIR" = "$(dump_dir state)"
 
-      - name: Custom shared bin preserves an unrelated Node executable
+      - name: Custom shared bin refreshes Node even in system-first mode
         run: |
           set -euo pipefail
           FOREIGN=$(mktemp -d)
           FAKE_TGZ=$(mktemp)
-          mkdir -p "$FOREIGN/.local/bin"
+          mkdir -p "$FOREIGN/.local/bin" "$FOREIGN/user-bin"
           printf '#!/bin/sh\necho foreign-node\n' > "$FOREIGN/.local/bin/node"
           chmod +x "$FOREIGN/.local/bin/node"
+          cp "$FOREIGN/.local/bin/node" "$FOREIGN/user-bin/node"
           export HOME="$FOREIGN"
           export USERPROFILE="$FOREIGN"
           export GITHUB_ACTION_REPOSITORY=voidzero-dev/setup-vp
@@ -570,17 +572,17 @@ jobs:
           export VP_BIN_DIR="$FOREIGN/.local/bin"
           export VP_DATA_DIR="$FOREIGN/.local/share/vite-plus"
           export VP_CACHE_DIR="$FOREIGN/.cache/vite-plus"
-          # Override the setting for this job. A custom bin can be shared. CI
-          # must not replace a Node executable that Vite+ does not own.
-          export VP_NODE_MANAGER=
+          # Explicitly sharing the Vite+ bin directory accepts replacement there; system-first tools elsewhere stay intact.
+          export VP_NODE_MANAGER=no
+          export PATH="$FOREIGN/user-bin:$PATH"
           unset VP_HOME
           unset XDG_DATA_HOME XDG_CACHE_HOME XDG_CONFIG_HOME XDG_STATE_HOME
           VP_LOCAL_TGZ="$FAKE_TGZ" VP_VERSION=local-foreign-node bash packages/cli/install.sh
 
           test ! -d "$FOREIGN/.vite-plus"
           test -f "$FOREIGN/.local/bin/node"
-          test ! -L "$FOREIGN/.local/bin/node"
-          test "$("$FOREIGN/.local/bin/node")" = "foreign-node"
+          test -L "$FOREIGN/.local/bin/node"
+          test "$("$FOREIGN/user-bin/node")" = "foreign-node"
 
       - name: Existing ~/.vite-plus is reused
         run: |
@@ -748,11 +750,41 @@ jobs:
           npm --version
           vp env doctor
 
+  test-install-ps1-remote-legacy:
+    name: Test remote legacy install.ps1 (${{ matrix.shell }})
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    env:
+      # Reproduce the setup-vp install that failed in cloudflare/vinext#3251.
+      VP_VERSION: '0.2.6'
+      VP_NODE_MANAGER: 'yes'
+      GITHUB_ACTION_REPOSITORY: voidzero-dev/setup-vp
+    steps:
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
+
+      - name: Install an old release through an HTTP byte-array response (PowerShell 5.1)
+        if: matrix.shell == 'powershell'
+        shell: powershell
+        run: ./.github/scripts/test-install-legacy-remote.ps1
+
+      - name: Install an old release through an HTTP byte-array response (PowerShell 7)
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
+        run: ./.github/scripts/test-install-legacy-remote.ps1
+
   test-install-sh-readonly-config:
-    name: Test install.sh (readonly shell config)
+    name: Test legacy install.sh (readonly shell config)
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      # These output assertions cover install-legacy.sh. Newer binaries run self-setup.
+      VP_VERSION: '0.2.9'
     steps:
       - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
 
@@ -1361,10 +1393,13 @@ jobs:
           Invoke-ProvenanceCase -Mode "valid-v0.2" -ExpectRejection $false
 
   test-install-ps1-release-age:
-    name: Test install.ps1 (minimum-release-age)
+    name: Test legacy install.ps1 (minimum-release-age)
     runs-on: namespace-profile-windows-4c-8g
     permissions:
       contents: read
+    env:
+      # The legacy script enforces release age; native self-setup uses a local override.
+      VP_VERSION: '0.2.9'
     steps:
       - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
 
@@ -1386,12 +1421,22 @@ jobs:
           try {
             Set-Content -Path $npmrc -Value "minimum-release-age=10000000"
 
-            $output = & powershell -NoProfile -ExecutionPolicy Bypass -File .\packages\cli\install.ps1 2>&1
-            $exitCode = $LASTEXITCODE
-            $text = $output -join "`n"
+            # PowerShell 5.1 treats redirected native stderr as an error under Stop.
+            # Capture each stream in a file so the assertions can inspect the failure.
+            $stdout = Join-Path $env:RUNNER_TEMP "vp-release-age.stdout.txt"
+            $stderr = Join-Path $env:RUNNER_TEMP "vp-release-age.stderr.txt"
+            $installer = (Resolve-Path ./packages/cli/install.ps1).Path
+            $process = Start-Process -FilePath (Get-Command powershell).Source `
+              -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$installer`"") `
+              -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
+              -Wait -PassThru
+            $text = @(
+              Get-Content -LiteralPath $stdout -Raw
+              Get-Content -LiteralPath $stderr -Raw
+            ) -join [Environment]::NewLine
             Write-Host $text
 
-            if ($exitCode -eq 0) {
+            if ($process.ExitCode -eq 0) {
               Write-Error "Expected install.ps1 to fail when pnpm minimum-release-age blocks vite-plus"
               exit 1
             }
@@ -1426,11 +1471,6 @@ jobs:
               Write-Error "Non-interactive install must not write minimum-release-age overrides"
               exit 1
             }
-
-            # The child install.ps1 is expected to fail in this test. Reset the
-            # native command exit code so the GitHub Actions PowerShell wrapper
-            # does not fail the step after our assertions pass.
-            $global:LASTEXITCODE = 0
           } finally {
             Remove-Item -Path $npmrc -Force -ErrorAction SilentlyContinue
             if (Test-Path $backup) {
@@ -1856,7 +1896,7 @@ jobs:
           if ($process.ExitCode -ne 1) {
             throw "install.ps1 exited with $($process.ExitCode), expected 1"
           }
-          if (-not $text.Contains("Set VP_BIN_DIR, VP_DATA_DIR, and VP_CACHE_DIR together")) {
+          if (-not $text.Contains("Set all three variables together: VP_BIN_DIR, VP_DATA_DIR, and VP_CACHE_DIR.")) {
             throw "install.ps1 did not report the incomplete override group"
           }
 
@@ -1916,7 +1956,7 @@ jobs:
           if (Test-Path $legacyRoot) { throw "implode left the monolithic root" }
           if ($removingRoots.Count -ne 0) { throw "implode left a renamed monolithic root" }
 
-      - name: PowerShell installer rejects an unversioned Node sidecar
+      - name: PowerShell installer refreshes shared-bin Node even in system-first mode
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -1926,10 +1966,13 @@ jobs:
           $cache = Join-Path $root "cache"
           $node = Join-Path $bin "node.exe"
           $pointer = Join-Path $bin "node.shim"
+          $externalNode = Join-Path $root "user-bin/node.exe"
           $fakeTgz = Join-Path $root "vite-plus.tgz"
           Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $bin | Out-Null
+          New-Item -ItemType Directory -Force -Path (Split-Path $externalNode) | Out-Null
           [System.IO.File]::WriteAllText($node, "foreign-node")
+          [System.IO.File]::WriteAllText($externalNode, "external-node")
           [System.IO.File]::WriteAllText($pointer, "$data`n")
           New-Item -ItemType File -Force -Path $fakeTgz | Out-Null
 
@@ -1941,16 +1984,21 @@ jobs:
           $env:VP_LOCAL_TGZ = $fakeTgz
           $env:VP_SKIP_DEPS_INSTALL = "1"
           $env:VP_VERSION = "local-foreign-node"
-          $env:VP_NODE_MANAGER = ""
+          # Explicitly sharing the Vite+ bin directory accepts replacement there; system-first tools elsewhere stay intact.
+          $env:VP_NODE_MANAGER = "no"
           $env:CI = "true"
 
           & ./packages/cli/install.ps1
 
-          if ([System.IO.File]::ReadAllText($node) -ne "foreign-node") {
-            Write-Error "install.ps1 replaced an unrelated node.exe"
+          $trampoline = Join-Path $data "current/bin/vp-shim.exe"
+          if ((Get-FileHash $node).Hash -ne (Get-FileHash $trampoline).Hash) {
+            Write-Error "install.ps1 did not refresh node.exe in the configured bin directory"
           }
-          if ([System.IO.File]::ReadAllText($pointer) -ne "$data`n") {
-            Write-Error "install.ps1 changed the unversioned node.shim"
+          if ([System.IO.File]::ReadAllText($pointer) -ne [System.IO.File]::ReadAllText((Join-Path $bin "vp.shim"))) {
+            Write-Error "install.ps1 did not refresh the Node shim pointer"
+          }
+          if ([System.IO.File]::ReadAllText($externalNode) -ne "external-node") {
+            Write-Error "install.ps1 replaced node.exe outside the configured bin directory"
           }
 
       - name: Complete directory overrides keep the split layout through the trampoline

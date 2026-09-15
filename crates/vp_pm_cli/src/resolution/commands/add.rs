@@ -27,12 +27,16 @@ pub struct AddArgs {
     #[arg(long, value_name = "NAMES", not_supported(npm, yarn, bun))]
     pub(crate) allow_build: Option<String>,
 
+    /// Do not run lifecycle scripts
+    #[arg(long)]
+    pub(crate) ignore_scripts: bool,
+
     /// Filter packages in monorepo (can be used multiple times)
     #[arg(long, value_name = "PATTERN", not_supported(bun < "1.4"))]
     pub(crate) filter: Vec<String>,
 
     /// Add to workspace root
-    #[arg(short = 'w', long, not_supported(bun))]
+    #[arg(short = 'w', long, not_supported(yarn >= "2", bun))]
     pub(crate) workspace_root: bool,
 
     /// Only add if package exists in workspace (pnpm-specific)
@@ -146,7 +150,9 @@ impl Resolve<AddArgs> for Pnpm {
         if let Some(allow_build) = &args.allow_build {
             cmd.arg(vt_str::format!("--allow-build={allow_build}"));
         }
-        cmd.extend(args.pass_through_args.iter()).extend(args.packages.iter());
+        cmd.arg_if("--ignore-scripts", args.ignore_scripts)
+            .extend(args.pass_through_args.iter())
+            .extend(args.packages.iter());
         cmd.into()
     }
 }
@@ -157,6 +163,7 @@ impl Npm {
         if args.global {
             cmd.arg("install")
                 .arg("--global")
+                .arg_if("--ignore-scripts", args.ignore_scripts)
                 .extend(args.pass_through_args.iter())
                 .extend(args.packages.iter());
             return cmd.into();
@@ -181,6 +188,7 @@ impl Npm {
             None => {}
         }
         cmd.arg_if("--save-exact", args.save_exact)
+            .arg_if("--ignore-scripts", args.ignore_scripts)
             .extend(args.pass_through_args.iter())
             .extend(args.packages.iter());
         cmd.into()
@@ -201,10 +209,17 @@ impl Resolve<AddArgs> for Yarn {
 
         let mut cmd = CommandBuilder::new("yarn");
         if !args.filter.is_empty() {
+            if !self.is_berry() {
+                return CommandResolution::InvalidArgument(
+                    "Invalid argument: `--filter` is not supported by Yarn Classic `add`."
+                        .to_string(),
+                );
+            }
+
             cmd.arg("workspaces").arg("foreach").arg("--all");
             cmd.repeated("--include", args.filter.iter());
         }
-        cmd.arg("add");
+        cmd.arg("add").arg_if("-W", args.workspace_root && !self.is_berry());
         match args.save_dependency.target() {
             Some(SaveDependencyTarget::Dev) => {
                 cmd.arg("--dev");
@@ -217,9 +232,15 @@ impl Resolve<AddArgs> for Yarn {
             }
             Some(SaveDependencyTarget::Production) | None => {}
         }
-        cmd.arg_if("--exact", args.save_exact)
-            .extend(args.pass_through_args.iter())
-            .extend(args.packages.iter());
+        cmd.arg_if("--exact", args.save_exact);
+        if args.ignore_scripts {
+            if self.is_berry() {
+                cmd.arg("--mode").arg("skip-build");
+            } else {
+                cmd.arg("--ignore-scripts");
+            }
+        }
+        cmd.extend(args.pass_through_args.iter()).extend(args.packages.iter());
         cmd.into()
     }
 }
@@ -245,6 +266,7 @@ impl Resolve<AddArgs> for Bun {
         }
         cmd.arg_if("--exact", args.save_exact)
             .arg_if("--catalog", args.save_catalog)
+            .arg_if("--ignore-scripts", args.ignore_scripts)
             .extend(args.pass_through_args.iter())
             .extend(args.packages.iter());
         cmd.into()
@@ -418,10 +440,10 @@ mod tests {
     }
 
     #[test]
-    fn test_yarn_add_with_workspace() {
+    fn test_yarn_berry_add_with_workspace() {
         let mut options = add_args(&["react"]);
         options.filter = vec!["app".to_string()];
-        let resolution = resolve(&yarn("1.22.22"), options);
+        let resolution = resolve(&yarn("4.0.0"), options);
         let command = expect_run(resolution.outcome);
 
         assert_eq!(command.program, "yarn");
@@ -429,6 +451,25 @@ mod tests {
             command.args,
             vec!["workspaces", "foreach", "--all", "--include", "app", "add", "react"]
         );
+    }
+
+    #[test]
+    fn test_yarn_classic_rejects_filtered_add() {
+        for filters in
+            [vec!["app".to_string()], vec!["app-*".to_string(), "@scope/web".to_string()]]
+        {
+            let mut options = add_args(&["react"]);
+            options.filter = filters;
+            let resolution = resolve(&yarn("1.22.22"), options);
+
+            assert_eq!(
+                resolution.outcome,
+                CommandResolution::InvalidArgument(
+                    "Invalid argument: `--filter` is not supported by Yarn Classic `add`."
+                        .to_string()
+                )
+            );
+        }
     }
 
     #[test]
@@ -440,7 +481,7 @@ mod tests {
         let command = expect_run(resolution.outcome);
 
         assert_eq!(command.program, "yarn");
-        assert_eq!(command.args, vec!["add", "--dev", "typescript"]);
+        assert_eq!(command.args, vec!["add", "-W", "--dev", "typescript"]);
         assert!(resolution.diagnostics.is_empty());
     }
 
@@ -533,21 +574,19 @@ mod tests {
     }
 
     #[test]
-    fn yarn_drops_workspace_root_without_warning() {
+    fn yarn_berry_drops_unsupported_workspace_root() {
         let mut args = add_args(&["react"]);
         args.workspace_root = true;
+        let resolution = resolve(&yarn("4.1.0"), args);
+        let command = expect_run(resolution.outcome);
 
-        let classic = resolve(&yarn("1.22.22"), args.clone());
-        let classic_command = expect_run(classic.outcome);
-        let berry = resolve(&yarn("4.1.0"), args);
-        let berry_command = expect_run(berry.outcome);
-
-        assert_eq!(classic_command.program, "yarn");
-        assert_eq!(classic_command.args, vec!["add", "react"]);
-        assert_eq!(berry_command.program, "yarn");
-        assert_eq!(berry_command.args, vec!["add", "react"]);
-        assert!(classic.diagnostics.is_empty());
-        assert!(berry.diagnostics.is_empty());
+        assert_eq!(command.program, "yarn");
+        assert_eq!(command.args, vec!["add", "react"]);
+        assert_eq!(resolution.diagnostics.len(), 1);
+        assert_eq!(
+            resolution.diagnostics[0].message,
+            "yarn >=2 does not support --workspace-root."
+        );
     }
 
     #[test]
