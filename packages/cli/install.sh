@@ -501,12 +501,15 @@ resolve_platform_distribution() {
     error "Failed to fetch CLI package metadata '${package_name}@${package_version}': ${registry_error}\n  URL: $metadata_url"
   fi
 
-  case "$predicate_type" in
-    https://slsa.dev/provenance/v1|https://slsa.dev/provenance/v0.2) ;;
-    *)
-      error "Refusing to install ${package_name}@${package_version}: the package does not contain supported npm provenance metadata. Vite+ only installs release binaries published with npm provenance."
-      ;;
-  esac
+  # Commit preview builds do not carry npm provenance, regardless of registry.
+  if [[ ! "$package_version" =~ ^0\.0\.0-commit\.[0-9a-fA-F]{40}$ ]]; then
+    case "$predicate_type" in
+      https://slsa.dev/provenance/v1|https://slsa.dev/provenance/v0.2) ;;
+      *)
+        error "Refusing to install ${package_name}@${package_version}: the package does not contain supported npm provenance metadata. Vite+ only installs release binaries published with npm provenance."
+        ;;
+    esac
+  fi
 
   if [ -z "$PLATFORM_TARBALL_URL" ]; then
     error "CLI package metadata for ${package_name}@${package_version} does not include dist.tarball\n  URL: $metadata_url"

@@ -99,6 +99,8 @@ Each commit on an eligible pull request is published to the [registry bridge](ht
 
 Both `vite-plus` and `@voidzero-dev/vite-plus-core` publish under the same `0.0.0-commit.<sha>` version. Each pull request carries a comment listing the exact version for its latest commit, along with ready-to-copy install steps.
 
+Installers and `vp upgrade` skip the npm provenance requirement for versions that match `0.0.0-commit.<sha>`, where `<sha>` is a full 40-character hexadecimal commit SHA. This exception applies to any registry. Other versions still require supported npm provenance metadata.
+
 You can find preview builds in pull requests that automatically update upstream dependencies. For examples, search the merged pull requests for [upstream dependency updates](https://github.com/voidzero-dev/vite-plus/pulls?q=is%3Apr+is%3Amerged+upgrade+upstream+dependencies).
 
 Preview builds are addressed by pull request number or commit SHA. They are not a stable version range, and you should avoid leaving them in long-lived branches unless a maintainer asks you to.

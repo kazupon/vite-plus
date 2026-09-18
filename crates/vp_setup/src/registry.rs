@@ -6,7 +6,7 @@
 use serde::Deserialize;
 use vp_pm_cli::{HttpClient, npm_registry};
 
-use crate::error::Error;
+use crate::{error::Error, is_commit_preview_version};
 
 /// npm package version metadata (subset of fields we need).
 #[derive(Debug, Deserialize)]
@@ -57,6 +57,11 @@ fn validate_platform_package_provenance(
     version: &str,
     dist: &DistInfo,
 ) -> Result<(), Error> {
+    // Commit preview builds do not carry npm provenance, regardless of registry.
+    if is_commit_preview_version(version) {
+        return Ok(());
+    }
+
     let predicate_type = dist
         .attestations
         .as_ref()
@@ -309,6 +314,36 @@ mod tests {
         assert_eq!(resolved.version, TEST_VERSION);
         assert_eq!(resolved.platform_tarball_url, "https://registry.example.test/platform.tgz");
         assert_eq!(resolved.platform_integrity, "sha512-test");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_preview_without_provenance_from_custom_registry() {
+        let version = "0.0.0-commit.0123456789abcdef0123456789abcdef01234567";
+        let server = MockServer::start();
+        let metadata = serde_json::json!({
+            "version": version,
+            "dist": {
+                "tarball": format!("{}/platform.tgz", server.base_url()),
+                "integrity": "sha512-preview",
+            },
+        });
+        let main_mock = server.mock(|when, then| {
+            when.method(GET).path("/vite-plus/preview");
+            then.status(200).json_body(metadata.clone());
+        });
+        let platform_mock = server.mock(|when, then| {
+            when.method(GET).path(format!("/{TEST_PACKAGE_NAME}/{version}"));
+            then.status(200).json_body(metadata);
+        });
+
+        let resolved =
+            resolve_version("preview", "darwin-arm64", Some(&server.base_url())).await.unwrap();
+
+        main_mock.assert();
+        platform_mock.assert();
+        assert_eq!(resolved.version, version);
+        assert_eq!(resolved.platform_tarball_url, format!("{}/platform.tgz", server.base_url()));
+        assert_eq!(resolved.platform_integrity, "sha512-preview");
     }
 
     #[tokio::test]

@@ -229,6 +229,26 @@ jobs:
           run_case valid-v1 allow
           run_case valid-v0.2 allow
 
+          # Commit previews can omit provenance on any registry. Other
+          # prereleases and malformed commit versions must still be rejected.
+          TEST_VERSION=0.0.0-commit.0123456789abcdef0123456789abcdef01234567
+          run_case missing allow
+          run_case unsupported allow
+          TEST_VERSION=0.0.0-commit.0123456789ABCDEF0123456789ABCDEF01234567
+          run_case missing allow
+          for TEST_VERSION in \
+            1.2.3-beta.1 \
+            0.0.0 \
+            0.0.0-beta.1 \
+            0.0.0-commit. \
+            0.0.0-commit.abc1234 \
+            0.0.0-commit.0123456789abcdef0123456789abcdef012345678 \
+            0.0.0-commit.0123456789abcdef0123456789abcdef0123456g \
+            0.0.0-COMMIT.0123456789abcdef0123456789abcdef01234567 \
+            0.0.0-commit.0123456789abcdef0123456789abcdef01234567.extra; do
+            run_case missing reject
+          done
+
   test-vp-upgrade-provenance:
     name: Test vp upgrade (npm provenance)
     runs-on: ubuntu-latest
@@ -1392,6 +1412,27 @@ jobs:
           Invoke-ProvenanceCase -Mode "valid-v1" -ExpectRejection $false
           Invoke-ProvenanceCase -Mode "valid-v0.2" -ExpectRejection $false
 
+          # Match the version policy in Rust and install.sh on a custom registry.
+          $env:TEST_VERSION = "0.0.0-commit.0123456789abcdef0123456789abcdef01234567"
+          Invoke-ProvenanceCase -Mode "missing" -ExpectRejection $false
+          Invoke-ProvenanceCase -Mode "unsupported" -ExpectRejection $false
+          $env:TEST_VERSION = "0.0.0-commit.0123456789ABCDEF0123456789ABCDEF01234567"
+          Invoke-ProvenanceCase -Mode "missing" -ExpectRejection $false
+          foreach ($version in @(
+            "1.2.3-beta.1",
+            "0.0.0",
+            "0.0.0-beta.1",
+            "0.0.0-commit.",
+            "0.0.0-commit.abc1234",
+            "0.0.0-commit.0123456789abcdef0123456789abcdef012345678",
+            "0.0.0-commit.0123456789abcdef0123456789abcdef0123456g",
+            "0.0.0-COMMIT.0123456789abcdef0123456789abcdef01234567",
+            "0.0.0-commit.0123456789abcdef0123456789abcdef01234567.extra"
+          )) {
+            $env:TEST_VERSION = $version
+            Invoke-ProvenanceCase -Mode "missing" -ExpectRejection $true
+          }
+
   test-install-ps1-release-age:
     name: Test legacy install.ps1 (minimum-release-age)
     runs-on: namespace-profile-windows-4c-8g
@@ -1718,7 +1759,8 @@ jobs:
 
             $registry = "http://127.0.0.1:$(Get-Content $portFile -Raw)"
             $binary = "${{ format('{0}/target/release/vp-setup.exe', env.DEV_DRIVE) }}"
-            $output = & $binary --yes --no-node-manager --no-modify-path --install-dir $installDir --registry $registry --version $env:TEST_VERSION 2>&1
+            $env:VP_HOME = $installDir
+            $output = & $binary --yes --no-node-manager --no-modify-path --registry $registry --version $env:TEST_VERSION 2>&1
             $exitCode = $LASTEXITCODE
             $text = $output -join "`n"
           } finally {
