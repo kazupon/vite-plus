@@ -1422,7 +1422,9 @@ jobs:
             "1.2.3-beta.1",
             "0.0.0",
             "0.0.0-beta.1",
-            "0.0.0-commit.",
+            # PowerShell 5.1 strips trailing dots from URL paths. Use a bare
+            # commit label to test a missing SHA through the registry fixture.
+            "0.0.0-commit",
             "0.0.0-commit.abc1234",
             "0.0.0-commit.0123456789abcdef0123456789abcdef012345678",
             "0.0.0-commit.0123456789abcdef0123456789abcdef0123456g",
