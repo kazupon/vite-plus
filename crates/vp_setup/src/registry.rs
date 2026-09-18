@@ -20,21 +20,19 @@ pub struct PackageVersionMetadata {
 pub struct DistInfo {
     pub tarball: String,
     pub integrity: String,
-    #[serde(default)]
     pub attestations: Option<NpmAttestations>,
 }
 
 /// npm attestations attached to a package version.
 #[derive(Debug, Deserialize)]
 pub struct NpmAttestations {
-    #[serde(default)]
     pub provenance: Option<NpmProvenance>,
 }
 
 /// npm provenance metadata used to identify the attestation predicate.
 #[derive(Debug, Deserialize)]
 pub struct NpmProvenance {
-    #[serde(rename = "predicateType", default)]
+    #[serde(rename = "predicateType")]
     pub predicate_type: Option<String>,
 }
 
@@ -66,8 +64,7 @@ fn validate_platform_package_provenance(
         .attestations
         .as_ref()
         .and_then(|attestations| attestations.provenance.as_ref())
-        .and_then(|provenance| provenance.predicate_type.as_deref())
-        .filter(|predicate_type| !predicate_type.is_empty());
+        .and_then(|provenance| provenance.predicate_type.as_deref());
 
     if predicate_type.is_some_and(|predicate_type| {
         SUPPORTED_PROVENANCE_PREDICATE_TYPES.contains(&predicate_type)
@@ -133,9 +130,7 @@ pub async fn resolve_platform_package(
         )
     })?;
 
-    // npm registry signatures only prove that registry metadata was signed. The
-    // provenance object separately binds the package to its supported build
-    // attestation, so reject before exposing the tarball URL to any caller.
+    // Check release provenance metadata before returning the tarball URL.
     validate_platform_package_provenance(&cli_package_name, version, &cli_meta.dist)?;
 
     Ok(ResolvedVersion {
@@ -176,7 +171,7 @@ mod tests {
         .unwrap()
     }
 
-    fn dist_with_provenance(predicate_type: serde_json::Value) -> serde_json::Value {
+    fn dist_with_provenance(predicate_type: &str) -> serde_json::Value {
         serde_json::json!({
             "tarball": "https://registry.example.test/platform.tgz",
             "integrity": "sha512-test",
@@ -199,7 +194,7 @@ mod tests {
     #[test]
     fn test_platform_package_accepts_supported_provenance_predicates() {
         for predicate_type in SUPPORTED_PROVENANCE_PREDICATE_TYPES {
-            let metadata = parse_metadata(dist_with_provenance(predicate_type.into()));
+            let metadata = parse_metadata(dist_with_provenance(predicate_type));
             assert!(
                 validate_platform_package_provenance(
                     TEST_PACKAGE_NAME,
@@ -229,9 +224,9 @@ mod tests {
                 "integrity": "sha512-test",
                 "attestations": { "provenance": {} },
             }),
-            dist_with_provenance("".into()),
-            dist_with_provenance(" https://slsa.dev/provenance/v1 ".into()),
-            dist_with_provenance("https://example.test/unknown-provenance/v1".into()),
+            dist_with_provenance(""),
+            dist_with_provenance(" https://slsa.dev/provenance/v1 "),
+            dist_with_provenance("https://example.test/unknown-provenance/v1"),
             serde_json::json!({
                 "tarball": "https://registry.example.test/platform.tgz",
                 "integrity": "sha512-test",
@@ -301,7 +296,7 @@ mod tests {
             when.method(GET).path("/@voidzero-dev/vite-plus-cli-darwin-arm64/1.2.3");
             then.status(200).json_body(serde_json::json!({
                 "version": TEST_VERSION,
-                "dist": dist_with_provenance("https://slsa.dev/provenance/v1".into()),
+                "dist": dist_with_provenance("https://slsa.dev/provenance/v1"),
             }));
         });
 

@@ -232,13 +232,12 @@ function Get-VerifiedPlatformTarballUrl {
         [string]$Version
     )
 
-    # Registry signatures and trusted-publisher labels are not substitutes for
-    # npm provenance. Check the typed object path so package-defined top-level
-    # fields cannot satisfy the gate, and deny unknown predicates before download.
+    # Check nested provenance metadata; registry signatures and package-defined
+    # top-level fields do not satisfy the release check.
     $predicateType = $Metadata.dist.attestations.provenance.predicateType
     # Commit preview builds do not carry npm provenance, regardless of registry.
-    if ($Version -cnotmatch '\A0\.0\.0-commit\.[0-9a-fA-F]{40}\z' -and
-        (-not $predicateType -or $SupportedProvenancePredicateTypes -notcontains $predicateType)) {
+    $isCommitPreview = $Version -cmatch '\A0\.0\.0-commit\.[0-9a-fA-F]{40}\z'
+    if (-not $isCommitPreview -and $SupportedProvenancePredicateTypes -notcontains $predicateType) {
         Write-Error-Exit "Refusing to install ${PackageName}@${Version}: the package does not contain supported npm provenance metadata. Vite+ only installs release binaries published with npm provenance."
     }
 

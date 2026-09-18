@@ -288,11 +288,8 @@ if (packagesDir) {
             // that verifies it (npm, pnpm, yarn, bun) gets a match.
             integrity: `sha512-${createHash('sha512').update(bytes).digest('base64')}`,
             shasum: createHash('sha1').update(bytes).digest('hex'),
-            // npm provenance is registry metadata, not part of the packed
-            // package.json. Published Vite+ platform packages carry this
-            // attestation, so synthesize it for their local test tarballs.
-            // Other local packages remain unchanged, allowing provenance
-            // rejection tests to serve packages without an attestation.
+            // Supply the provenance metadata that npm adds to published platform
+            // packages so local test tarballs pass the installer check.
             ...(pkg.name.startsWith(VITE_PLUS_PLATFORM_PACKAGE_PREFIX) && {
               attestations: {
                 provenance: {

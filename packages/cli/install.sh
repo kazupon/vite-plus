@@ -47,6 +47,7 @@ RED='\033[0;31m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 PACKAGE_METADATA=""
+PLATFORM_TARBALL_URL=""
 # Legacy is published beside this bootstrap; preview builds rewrite this origin.
 LEGACY_INSTALLER_URL="${VP_LEGACY_INSTALLER_URL:-https://viteplus.dev/install-legacy.sh}"
 INSTALLER_PATH="${BASH_SOURCE[0]:-}"
@@ -221,8 +222,6 @@ check_requirements() {
 
 # Fetch package metadata from npm registry (cached for reuse)
 # Uses VP_VERSION to fetch the correct version's metadata
-PACKAGE_METADATA=""
-PLATFORM_TARBALL_URL=""
 fetch_package_metadata() {
   if [ -z "$PACKAGE_METADATA" ]; then
     local version_path metadata_url
@@ -472,11 +471,8 @@ parse_platform_distribution_metadata() {
   '
 }
 
-# Fetch exact platform package metadata and admit only npm provenance predicate
-# types supported by Vite+. `dist.signatures` is deliberately insufficient: it
-# authenticates registry metadata, while provenance binds this release binary
-# to the build that produced it. Any missing or unrecognized evidence is denied
-# before the tarball URL is used.
+# Resolve the exact platform tarball and check release provenance before download.
+# Registry signatures alone do not satisfy this check.
 resolve_platform_distribution() {
   local package_name="$1"
   local package_version="$2"
